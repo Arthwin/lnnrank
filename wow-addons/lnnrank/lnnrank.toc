@@ -1,0 +1,14 @@
+## Interface: 120005, 120007
+## Title: LÑÑRank
+## Author: lnnrank
+## Notes: Shows companion-generated Warcraft Logs Mythic+ score data on player tooltips.
+## Version: 1.0.0
+## OptionalDeps: lnnrank_companion
+## SavedVariables: lnnrankDB
+
+Core.lua
+Settings.lua
+Interactions.lua
+Collectors.lua
+MinimapButton.lua
+Tooltip.lua
