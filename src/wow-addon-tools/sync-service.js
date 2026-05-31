@@ -1,6 +1,5 @@
 "use strict";
 
-const fs = require("node:fs");
 const path = require("node:path");
 
 const { formatIsoTimestamp } = require("../mplus-matrix/utils");
@@ -33,14 +32,13 @@ const {
   WclRateLimitError,
   acquireReusableWebLookupSession,
   createWebLookupSession,
-  fetchSingleCharacterViaApi,
-  hasApiCredentials,
+  fetchCharacterViaProvider,
   recordNeedsWebEnrichment,
   resolveLookupProvider,
 } = require("./live-provider");
 const { getPreferredMetricForRole, normalizeRoleValue } = require("../shared/wow-specs");
 const { LookupQueue, buildLookupQueueKey, runLookupWorkers } = require("./lookup-queue");
-const { parseLnnrankSavedVariables } = require("./saved-variables");
+const { loadSavedVariablesFile } = require("./saved-variables");
 
 function normalizeRoleHint(value) {
   return normalizeRoleValue(value);
@@ -65,28 +63,8 @@ function pushStatus(cache, statusEntries, request, state, message) {
   return status;
 }
 
-function parseSavedVariablesFile(savedVariablesFile) {
-  if (!savedVariablesFile || !fs.existsSync(savedVariablesFile)) {
-    return {
-      file: null,
-      parsed: {
-        settings: {},
-        requests: [],
-        groupMembers: [],
-        applicants: [],
-        lastImportedBuild: null,
-      },
-    };
-  }
-
-  return {
-    file: savedVariablesFile,
-    parsed: parseLnnrankSavedVariables(fs.readFileSync(savedVariablesFile, "utf8")),
-  };
-}
-
 async function runAddonRequestSync(options = {}) {
-  const savedVariablesState = parseSavedVariablesFile(options.savedVariablesFile || null);
+  const savedVariablesState = loadSavedVariablesFile(options.savedVariablesFile || null);
   const maxRequests =
     options.maxRequests == null ? null : Number.parseInt(String(options.maxRequests), 10);
   const cachePath = options.cachePath
@@ -280,47 +258,12 @@ async function runAddonRequestSync(options = {}) {
 
       return {
         async fetch(lookup) {
-          if (provider === "web") {
-            return fetchWithWeb(lookup);
-          }
-
-          if (provider === "api") {
-            return fetchWithApi(lookup);
-          }
-
-          if (provider === "auto") {
-            if (hasApiCredentials()) {
-              try {
-                const apiResult = await fetchWithApi(lookup);
-                if (apiResult.found && apiResult.record && recordNeedsWebEnrichment(apiResult.record)) {
-                  try {
-                    return {
-                      ...(await fetchWithWeb(lookup)),
-                      fallbackFrom: "api",
-                      fallbackReason: "API result was incomplete and was enriched from the web page.",
-                    };
-                  } catch {
-                    return {
-                      ...apiResult,
-                      fallbackFrom: "api",
-                      fallbackReason: "API result was incomplete, but web enrichment failed.",
-                    };
-                  }
-                }
-                return apiResult;
-              } catch (error) {
-                return {
-                  ...(await fetchWithWeb(lookup)),
-                  fallbackFrom: "api",
-                  fallbackReason: error.message || "API lookup failed before web fallback.",
-                };
-              }
-            }
-
-            return fetchWithWeb(lookup);
-          }
-
-          throw new Error(`Unsupported provider mode for live lookup: ${provider}`);
+          return fetchCharacterViaProvider(lookup, {
+            provider,
+            fetchApi: fetchWithApi,
+            fetchWeb: fetchWithWeb,
+            needsWebEnrichment: recordNeedsWebEnrichment,
+          });
         },
         async close() {
           if (webSessionHandle) {

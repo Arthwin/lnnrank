@@ -789,6 +789,90 @@ async function fetchSingleCharacterViaWeb({
   );
 }
 
+async function fetchCharacterViaProvider(lookup, options = {}) {
+  const provider = resolveLookupProvider(options.provider || DEFAULT_LOOKUP_PROVIDER);
+  const fetchApi =
+    typeof options.fetchApi === "function"
+      ? options.fetchApi
+      : (nextLookup) => fetchSingleCharacterViaApi(nextLookup);
+  const fetchWeb =
+    typeof options.fetchWeb === "function"
+      ? options.fetchWeb
+      : (nextLookup) =>
+          fetchSingleCharacterViaWeb({
+            ...nextLookup,
+            browserPath: options.browserPath || null,
+          });
+  const shouldUseApi =
+    options.hasApiCredentials == null ? hasApiCredentials() : options.hasApiCredentials === true;
+  const needsWebEnrichment =
+    typeof options.needsWebEnrichment === "function"
+      ? options.needsWebEnrichment
+      : recordNeedsWebEnrichment;
+
+  if (provider === "off") {
+    throw new Error("Live lookups are disabled for this run.");
+  }
+
+  if (provider === "web") {
+    return {
+      ...(await fetchWeb(lookup)),
+      providerUsed: "web",
+    };
+  }
+
+  if (provider === "api") {
+    return {
+      ...(await fetchApi(lookup)),
+      providerUsed: "api",
+    };
+  }
+
+  if (provider === "auto") {
+    if (shouldUseApi) {
+      try {
+        const apiResult = await fetchApi(lookup);
+        if (apiResult.found && apiResult.record && needsWebEnrichment(apiResult.record)) {
+          try {
+            return {
+              ...(await fetchWeb(lookup)),
+              providerUsed: "web",
+              fallbackFrom: "api",
+              fallbackReason: "API result was incomplete and was enriched from the web page.",
+            };
+          } catch {
+            return {
+              ...apiResult,
+              providerUsed: "api",
+              fallbackFrom: "api",
+              fallbackReason: "API result was incomplete, but web enrichment failed.",
+            };
+          }
+        }
+
+        return {
+          ...apiResult,
+          providerUsed: "api",
+        };
+      } catch (error) {
+        return {
+          ...(await fetchWeb(lookup)),
+          providerUsed: "web",
+          fallbackFrom: "api",
+          fallbackReason: error.message || "API lookup failed before web fallback.",
+        };
+      }
+    }
+
+    return {
+      ...(await fetchWeb(lookup)),
+      providerUsed: "web",
+    };
+  }
+
+  throw new Error(`Unsupported provider mode for live lookup: ${provider}`);
+}
+
 async function createWebLookupSession(options = {}) {
   const connection = await createBrowserConnection(options);
   return {
@@ -896,6 +980,7 @@ module.exports = {
   WclRateLimitError,
   acquireReusableWebLookupSession,
   createWebLookupSession,
+  fetchCharacterViaProvider,
   fetchSingleCharacterViaApi,
   fetchSingleCharacterViaWeb,
   hasApiCredentials,

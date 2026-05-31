@@ -55,6 +55,7 @@ WCL_CLIENT_SECRET
 ```powershell
 npm run check
 npm test
+npm run dev
 npm run wow-addon-dashboard
 npm run build-wow-addon-character -- --region us --realm Stormrage --name Urmomgargles
 npm run build-wow-addon-mock -- --install-wow
@@ -67,6 +68,35 @@ Dashboard URL:
 http://127.0.0.1:47832
 ```
 
+Dev dashboard URL:
+
+```text
+http://127.0.0.1:47842
+```
+
+## Safe dev run
+
+Use the repo-local dev launcher when you want to iterate without touching the live WoW install:
+
+```powershell
+npm run dev
+```
+
+This runs the dashboard in watch mode and keeps its state inside the current worktree under `output/dev-run`, including:
+
+- a sandbox DB JSON
+- a sandbox `WTF\Account\...\SavedVariables\lnnrank.lua`
+- sandbox staged addon output
+- a sandbox `Interface\AddOns` target
+
+Optional examples:
+
+```powershell
+node src/wow-addon-tools/dev-run.js --port 47852
+node src/wow-addon-tools/dev-run.js --reset-state
+node src/wow-addon-tools/dev-run.js --copy-saved-variables C:\path\to\lnnrank.lua
+```
+
 ## Environment variables
 
 - `WCL_CLIENT_ID`: Warcraft Logs API client ID
@@ -76,6 +106,7 @@ http://127.0.0.1:47832
 - `WCL_WEB_DATA_TIMEOUT_MS`: browser wait timeout for page data
 - `WCL_WEB_BROWSER_IDLE_MS`: shared browser reuse window
 - `WCL_DASHBOARD_PORT`: dashboard port, default `47832`
+- `WCL_DASHBOARD_DEV_PORT`: dev dashboard port, default `47842`
 - `WCL_DASHBOARD_DB_PATH`: optional override for the local DB JSON path
 - `WCL_DASHBOARD_ACCOUNT_ROOT`: optional WoW account root override for SavedVariables scanning
 - `WCL_DASHBOARD_OUTPUT_DIR`: optional generated output directory override

@@ -32,6 +32,10 @@ const {
   buildUnifiedQueue,
   createDashboardServer,
 } = require("../src/wow-addon-tools/dashboard-server");
+const {
+  buildDevRuntimePaths,
+  ensureDevRuntime,
+} = require("../src/wow-addon-tools/dev-run");
 
 test("saved variables parser extracts queued WCL requests", () => {
   const lua = `
@@ -422,7 +426,7 @@ test("sync request builder reuses the exact queue snapshot shown in the app", ()
       lastSeenAt: 1780203240,
       seenCount: 2,
       sources: ["world"],
-      requestOrigins: ["local-db"],
+      requestOrigins: ["manual"],
     },
   ]);
 
@@ -450,6 +454,27 @@ test("sync request builder reuses the exact queue snapshot shown in the app", ()
     lastSeenAt: 1780203240,
     seenCount: 2,
   });
+});
+
+test("dev runtime bootstraps an isolated dashboard sandbox inside the chosen root", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dev-run-"));
+  const runtimePaths = buildDevRuntimePaths(tempDir);
+
+  ensureDevRuntime(runtimePaths, {
+    resetState: true,
+  });
+
+  assert.equal(runtimePaths.dbPath.startsWith(tempDir), true);
+  assert.equal(runtimePaths.savedVariablesFile.startsWith(tempDir), true);
+  assert.equal(runtimePaths.addonsDir.startsWith(tempDir), true);
+  assert.equal(fs.existsSync(runtimePaths.dbPath), true);
+  assert.equal(fs.existsSync(runtimePaths.savedVariablesFile), true);
+
+  const parsedSavedVariables = parseLnnrankSavedVariables(
+    fs.readFileSync(runtimePaths.savedVariablesFile, "utf8")
+  );
+  assert.deepEqual(parsedSavedVariables.requests, []);
+  assert.deepEqual(JSON.parse(fs.readFileSync(runtimePaths.dbPath, "utf8")).records, {});
 });
 
 test("dashboard auto sync recovers after an earlier queue-empty skip", async () => {
@@ -488,6 +513,7 @@ test("dashboard auto sync recovers after an earlier queue-empty skip", async () 
     dbPath,
     outputDir,
     addonsDir,
+    provider: "api",
     disableBackgroundTick: true,
     testHooks,
     runAddonRequestSync: async (options) => {
@@ -530,6 +556,7 @@ test("dashboard auto sync recovers after an earlier queue-empty skip", async () 
     assert.equal(secondResult.skipped, undefined);
     assert.equal(syncCalls, 1);
     assert.equal(lastSyncOptions.requests.length, 1);
+    assert.equal(lastSyncOptions.provider, "api");
     assert.equal(lastSyncOptions.requests[0].statusSource, "applicant");
     assert.equal(lastSyncOptions.requests[0].characterName, "Urmomgargles");
   } finally {

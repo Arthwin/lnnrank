@@ -36,11 +36,10 @@ const { runAddonRequestSync } = require("./sync-service");
 const {
   clearLnnrankSavedVariablesQueue,
   DEFAULT_WOW_ACCOUNT_ROOT,
-  findSavedVariablesFiles,
-  parseLnnrankSavedVariables,
+  loadSavedVariablesSnapshot,
+  pickLatestSavedVariablesFile,
   removeLnnrankSavedVariablesQueueEntry,
 } = require("./saved-variables");
-const { DEFAULT_LOOKUP_PROVIDER } = require("./live-provider");
 
 const DEFAULT_PORT = Number.parseInt(process.env.WCL_DASHBOARD_PORT || "47832", 10);
 const DASHBOARD_ROOT = path.join(__dirname, "dashboard");
@@ -67,34 +66,6 @@ async function readRequestBody(request) {
     return {};
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-}
-
-function pickSavedVariablesFile(accountRoot = DEFAULT_WOW_ACCOUNT_ROOT) {
-  const files = findSavedVariablesFiles(accountRoot);
-  return files[0] || null;
-}
-
-function loadSavedVariablesSnapshot(accountRoot = DEFAULT_WOW_ACCOUNT_ROOT) {
-  const latest = pickSavedVariablesFile(accountRoot);
-  if (!latest) {
-    return {
-      file: null,
-      lastModifiedMs: null,
-      parsed: {
-        settings: {},
-        requests: [],
-        groupMembers: [],
-        applicants: [],
-        lastImportedBuild: null,
-      },
-    };
-  }
-
-  return {
-    file: latest.path,
-    lastModifiedMs: latest.lastModifiedMs,
-    parsed: parseLnnrankSavedVariables(fs.readFileSync(latest.path, "utf8")),
-  };
 }
 
 function enrichCharacters(entries, cache) {
@@ -224,7 +195,7 @@ function buildUnifiedQueue(cache, savedQueue) {
     addEntry(entry, entry.source || "wow", "savedvariables");
   }
   for (const entry of listManualRequests(cache)) {
-    addEntry(entry, entry.source || "manual", "local-db");
+    addEntry(entry, entry.source || "manual", "manual");
   }
 
   return [...merged.values()]
@@ -295,14 +266,14 @@ function buildSyncRequestsFromQueue(queueEntries) {
   return (queueEntries || []).map((entry) => {
     const sources = Array.isArray(entry.sources) ? entry.sources.filter(Boolean) : [];
     const requestOrigins = Array.isArray(entry.requestOrigins) ? entry.requestOrigins.filter(Boolean) : [];
-    const hasLocalOrigin = requestOrigins.includes("local-db");
-    const source = sources[0] || (hasLocalOrigin ? "manual" : "savedvariables");
+    const hasManualOrigin = requestOrigins.includes("manual");
+    const source = sources[0] || (hasManualOrigin ? "manual" : "savedvariables");
     const request = {
       key: entry.key,
       region: entry.region,
       realm: entry.realm,
       characterName: entry.characterName,
-      requestOrigin: hasLocalOrigin ? "manual" : "savedvariables",
+      requestOrigin: hasManualOrigin ? "manual" : "savedvariables",
       requestSource: source,
       statusSource: source,
       updatedAt: entry.requestTimestamp || null,
@@ -349,6 +320,7 @@ async function createDashboardServer(options = {}) {
     ? path.resolve(String(options.outputDir))
     : DEFAULT_OUTPUT_DIR;
   const addonsDir = options.addonsDir ? path.resolve(String(options.addonsDir)) : null;
+  const provider = options.provider || null;
   const syncRequests = options.runAddonRequestSync || runAddonRequestSync;
   const backgroundTickMs =
     options.backgroundTickMs == null ? 5000 : Number.parseInt(String(options.backgroundTickMs), 10);
@@ -467,15 +439,15 @@ async function createDashboardServer(options = {}) {
         autoSync.queueLength = beforeState.meta.queueCount;
         autoSync.statusCount = 0;
 
-        const savedVariables = pickSavedVariablesFile(accountRoot);
+        const savedVariables = pickLatestSavedVariablesFile(accountRoot);
         const queuedRequests = buildSyncRequestsFromQueue(beforeState.queue);
         const result = await syncRequests({
           savedVariablesFile: savedVariables ? savedVariables.path : null,
           dbPath,
           outputDir,
           addonsDir,
+          provider,
           requests: queuedRequests,
-          provider: DEFAULT_LOOKUP_PROVIDER,
           workers: 1,
           installWow: true,
           onUpdate: async (update) => {
@@ -578,7 +550,7 @@ async function createDashboardServer(options = {}) {
         const cache = loadCache(dbPath);
         const manualRemoved = removeManualRequest(cache, key);
 
-        const savedVariables = pickSavedVariablesFile(accountRoot);
+        const savedVariables = pickLatestSavedVariablesFile(accountRoot);
         const savedVariablesRemoved = savedVariables
           ? removeLnnrankSavedVariablesQueueEntry(savedVariables.path, key)
           : { filePath: null, removed: 0 };
@@ -610,7 +582,7 @@ async function createDashboardServer(options = {}) {
         const cache = loadCache(dbPath);
         const manualRemoved = clearManualRequests(cache);
 
-        const savedVariables = pickSavedVariablesFile(accountRoot);
+        const savedVariables = pickLatestSavedVariablesFile(accountRoot);
         const savedVariablesRemoved = savedVariables
           ? clearLnnrankSavedVariablesQueue(savedVariables.path)
           : { filePath: null, cleared: false, removed: 0 };
@@ -703,6 +675,7 @@ async function main() {
     accountRoot: process.env.WCL_DASHBOARD_ACCOUNT_ROOT || null,
     outputDir: process.env.WCL_DASHBOARD_OUTPUT_DIR || null,
     addonsDir: process.env.WCL_DASHBOARD_ADDONS_DIR || DEFAULT_WOW_ADDONS_DIR,
+    provider: process.env.WCL_LOOKUP_PROVIDER || null,
   });
   server.listen(DEFAULT_PORT, "127.0.0.1", () => {
     process.stdout.write(`WCL dashboard listening on http://127.0.0.1:${DEFAULT_PORT}\n`);

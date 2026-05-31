@@ -17,6 +17,7 @@ const {
 } = require("../src/wow-addon-tools/lnnrank-bridge");
 const {
   buildRecordFromWebSnapshot,
+  fetchCharacterViaProvider,
   normalizeLookupInput,
   runWebCharacterPipeline,
 } = require("../src/wow-addon-tools/live-provider");
@@ -515,4 +516,48 @@ test("shared web pipeline never falls back to points parses when a role-specific
   assert.equal(result.record.dungeons[0].highestLevelText, "12+");
   assert.equal(result.record.dungeons[1].bestPercent, null);
   assert.equal(result.record.dungeons[1].highestLevelText, "13");
+});
+
+test("shared provider helper upgrades incomplete auto API results with a web fetch", async () => {
+  const calls = [];
+  const result = await fetchCharacterViaProvider(
+    {
+      region: "us",
+      realm: "Stormrage",
+      name: "Atiezh",
+    },
+    {
+      provider: "auto",
+      hasApiCredentials: true,
+      fetchApi: async () => {
+        calls.push("api");
+        return {
+          found: true,
+          record: {
+            score: 2882.62,
+            dungeons: [],
+          },
+        };
+      },
+      fetchWeb: async () => {
+        calls.push("web");
+        return {
+          found: true,
+          record: {
+            score: 2882.62,
+            dungeons: [
+              {
+                slug: "algetharacademy",
+                highestLevel: 13,
+              },
+            ],
+          },
+        };
+      },
+    }
+  );
+
+  assert.deepEqual(calls, ["api", "web"]);
+  assert.equal(result.providerUsed, "web");
+  assert.equal(result.fallbackFrom, "api");
 });

@@ -29,9 +29,8 @@ const {
 const {
   DEFAULT_LOOKUP_PROVIDER,
   WclRateLimitError,
+  fetchCharacterViaProvider,
   fetchSingleCharacterViaApi,
-  fetchSingleCharacterViaWeb,
-  hasApiCredentials,
   recordNeedsWebEnrichment,
   resolveLookupProvider,
 } = require("./live-provider");
@@ -48,7 +47,7 @@ function printUsage() {
       "  --addons-dir <path>",
       "  --db-path <path>",
       "  --cache-path <path> (legacy alias)",
-      `  --provider <web|api|off> (default: ${DEFAULT_LOOKUP_PROVIDER})`,
+      `  --provider <auto|web|api|off> (default: ${DEFAULT_LOOKUP_PROVIDER})`,
       "  --browser-path <path>",
       "  --force-refresh",
       "  --install-wow",
@@ -94,52 +93,35 @@ async function main() {
 
   let record = cachedRecord;
   let rateLimit = null;
-  let source = cachedRecord ? "cache" : provider === "web" ? "warcraftlogs-web" : "warcraftlogs-api";
+  let source = cachedRecord ? "cache" : null;
   let providerCooldown = null;
 
   if (!record) {
     try {
-      if (provider === "off") {
-        throw new Error("Live lookups are disabled for this run.");
-      }
-      if (provider === "api") {
-        providerCooldown = getProviderCooldown(cache, "api");
-        if (providerCooldown.isCoolingDown) {
-          throw new ProviderCooldownError("api", providerCooldown);
+      const result = await fetchCharacterViaProvider(
+        { region, realm, name },
+        {
+          provider,
+          browserPath,
+          fetchApi: async (lookup) => {
+            providerCooldown = getProviderCooldown(cache, "api");
+            if (providerCooldown.isCoolingDown) {
+              throw new ProviderCooldownError("api", providerCooldown);
+            }
+            providerCooldown = markProviderAttempt(cache, "api", {
+              cooldownMs: API_ATTEMPT_COOLDOWN_MS,
+            });
+            saveCache(cache, cachePath);
+            return fetchSingleCharacterViaApi(lookup);
+          },
         }
-        providerCooldown = markProviderAttempt(cache, "api", {
-          cooldownMs: API_ATTEMPT_COOLDOWN_MS,
-        });
-        saveCache(cache, cachePath);
-      }
-
-      const result =
-        provider === "web"
-          ? await fetchSingleCharacterViaWeb({ region, realm, name, browserPath })
-          : provider === "auto"
-            ? hasApiCredentials()
-              ? await (async () => {
-                  const apiResult = await fetchSingleCharacterViaApi({ region, realm, name });
-                  if (apiResult.found && apiResult.record && recordNeedsWebEnrichment(apiResult.record)) {
-                    try {
-                      return {
-                        ...(await fetchSingleCharacterViaWeb({ region, realm, name, browserPath })),
-                        fallbackFrom: "api",
-                        fallbackReason: "API result was incomplete and was enriched from the web page.",
-                      };
-                    } catch {
-                      return apiResult;
-                    }
-                  }
-                  return apiResult;
-                })()
-              : await fetchSingleCharacterViaWeb({ region, realm, name, browserPath })
-            : await fetchSingleCharacterViaApi({ region, realm, name });
+      );
       if (!result.found || !result.record) {
         throw new Error(`Warcraft Logs did not return a character for ${region}/${realm}/${name}.`);
       }
       record = result.record;
       rateLimit = result.rateLimit || null;
+      source = result.providerUsed === "web" ? "warcraftlogs-web" : "warcraftlogs-api";
       upsertCachedRecord(cache, record);
       record = getCachedRecord(cache, { region, realm, name }) || record;
       saveCache(cache, cachePath);

@@ -7,7 +7,7 @@ const path = require("node:path");
 
 const { parseCommandLine } = require("../mplus-matrix/config");
 const { DEFAULT_LOOKUP_PROVIDER } = require("./live-provider");
-const { DEFAULT_WOW_ACCOUNT_ROOT, findSavedVariablesFiles } = require("./saved-variables");
+const { DEFAULT_WOW_ACCOUNT_ROOT, pickLatestSavedVariablesFile } = require("./saved-variables");
 const { runAddonRequestSync } = require("./sync-service");
 
 function printUsage() {
@@ -23,7 +23,7 @@ function printUsage() {
       "  --cache-path <path> (legacy alias)",
       "  --output-dir <path>",
       "  --addons-dir <path>",
-      `  --provider <web|api|off> (default: ${DEFAULT_LOOKUP_PROVIDER})`,
+      `  --provider <auto|web|api|off> (default: ${DEFAULT_LOOKUP_PROVIDER})`,
       "  --browser-path <path>",
       "  --max-requests <number>",
       "  --workers <number>",
@@ -41,8 +41,8 @@ function pickSavedVariablesFile(options) {
   const accountRoot = options["wow-account-root"]
     ? path.resolve(String(options["wow-account-root"]))
     : DEFAULT_WOW_ACCOUNT_ROOT;
-  const files = findSavedVariablesFiles(accountRoot);
-  return files[0] ? files[0].path : null;
+  const latest = pickLatestSavedVariablesFile(accountRoot);
+  return latest ? latest.path : null;
 }
 
 async function main() {

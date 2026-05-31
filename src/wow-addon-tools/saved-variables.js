@@ -23,6 +23,28 @@ const REQUEST_FIELD_ORDER = [
   "memberIndex",
 ];
 
+function createEmptyParsedSavedVariables() {
+  return {
+    settings: {},
+    requests: [],
+    groupMembers: [],
+    applicants: [],
+    lastImportedBuild: null,
+  };
+}
+
+function renderEmptySavedVariablesFile() {
+  return [
+    "lnnrankDB = {",
+    '  ["settings"] = {},',
+    '  ["requests"] = {},',
+    '  ["groupMembers"] = {},',
+    '  ["applicants"] = {},',
+    "}",
+    "",
+  ].join("\n");
+}
+
 function findSavedVariablesFiles(accountRootDir = DEFAULT_WOW_ACCOUNT_ROOT) {
   if (!fs.existsSync(accountRootDir)) {
     return [];
@@ -49,6 +71,11 @@ function findSavedVariablesFiles(accountRootDir = DEFAULT_WOW_ACCOUNT_ROOT) {
 
   files.sort((left, right) => right.lastModifiedMs - left.lastModifiedMs);
   return files;
+}
+
+function pickLatestSavedVariablesFile(accountRootDir = DEFAULT_WOW_ACCOUNT_ROOT) {
+  const files = findSavedVariablesFiles(accountRootDir);
+  return files[0] || null;
 }
 
 function findTableBlockRange(source, tableName) {
@@ -253,11 +280,7 @@ function parseSnapshotEntries(block) {
 function parseLnnrankSavedVariables(text) {
   const rootBlock = extractTableBlock(text, "lnnrankDB");
   if (rootBlock == null) {
-    return {
-      settings: {},
-      requests: [],
-      lastImportedBuild: null,
-    };
+    return createEmptyParsedSavedVariables();
   }
 
   const requestsBlock = extractTableBlock(rootBlock, "requests");
@@ -276,6 +299,37 @@ function parseLnnrankSavedVariables(text) {
     groupMembers: groupMembersBlock == null ? [] : parseSnapshotEntries(groupMembersBlock),
     applicants: applicantsBlock == null ? [] : parseSnapshotEntries(applicantsBlock),
     lastImportedBuild: extractScalarField(rootBlock, "lastImportedBuild"),
+  };
+}
+
+function loadSavedVariablesFile(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return {
+      file: null,
+      parsed: createEmptyParsedSavedVariables(),
+    };
+  }
+
+  return {
+    file: filePath,
+    parsed: parseLnnrankSavedVariables(fs.readFileSync(filePath, "utf8")),
+  };
+}
+
+function loadSavedVariablesSnapshot(accountRootDir = DEFAULT_WOW_ACCOUNT_ROOT) {
+  const latest = pickLatestSavedVariablesFile(accountRootDir);
+  if (!latest) {
+    return {
+      file: null,
+      lastModifiedMs: null,
+      parsed: createEmptyParsedSavedVariables(),
+    };
+  }
+
+  return {
+    file: latest.path,
+    lastModifiedMs: latest.lastModifiedMs,
+    parsed: parseLnnrankSavedVariables(fs.readFileSync(latest.path, "utf8")),
   };
 }
 
@@ -369,8 +423,13 @@ function removeLnnrankSavedVariablesQueueEntry(filePath, requestKey) {
 module.exports = {
   clearLnnrankSavedVariablesQueue,
   clearLnnrankSavedVariablesRequestsText,
+  createEmptyParsedSavedVariables,
   DEFAULT_WOW_ACCOUNT_ROOT,
   findSavedVariablesFiles,
+  loadSavedVariablesFile,
+  loadSavedVariablesSnapshot,
   parseLnnrankSavedVariables,
+  pickLatestSavedVariablesFile,
+  renderEmptySavedVariablesFile,
   removeLnnrankSavedVariablesQueueEntry,
 };
