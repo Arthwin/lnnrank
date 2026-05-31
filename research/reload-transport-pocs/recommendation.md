@@ -2,6 +2,9 @@
 
 Date: 2026-05-31
 
+If the current question is only **addon -> desktop app**, see
+`addon-to-app-options.md` first.
+
 ## Bottom line
 
 If the goal is **true no-reload live updates**, the viable path is:
@@ -187,7 +190,7 @@ request-export half and make the app feel truly live.
 ## Sources
 
 - Official WoW API docs:
-  [TakeScreenshot](https://warcraft.wiki.gg/wiki/API_TakeScreenshot)
+  [Screenshot](https://warcraft.wiki.gg/wiki/API_Screenshot)
   [SendChatMessage](https://warcraft.wiki.gg/wiki/API_SendChatMessage)
   [SendChatMessageType](https://warcraft.wiki.gg/wiki/API_types/SendChatMessageType)
 - Community discussion on getting data out without reload:

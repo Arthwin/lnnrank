@@ -3,8 +3,18 @@
 These are isolated throwaway probes for researching ways around WoW addon
 reload requirements without touching the main app or addon.
 
+## Current focus
+
+If the current question is strictly **addon -> desktop app** live signaling,
+start with:
+
+- `addon-to-app-options.md`
+
 ## Files
 
+- `addon-to-app-options.md`
+  Focused transport ranking for sending lookup payloads from the running addon
+  to the local app without `/reload`.
 - `watch-chatlog-latency.js`
   Tails `WoWChatLog.txt`, parses new lines, and estimates how long it took them
   to arrive after their embedded timestamp.
