@@ -88,6 +88,129 @@ Sources:
 - `SCREENSHOT_SUCCEEDED`:
   <https://warcraft.wiki.gg/wiki/SCREENSHOT_SUCCEEDED>
 
+## Midnight-specific sources worth watching
+
+These are the most relevant Midnight-era sources I found for this question.
+
+### 1. Blizzard's Midnight addon communication rollback note
+
+Date: October 3, 2025
+
+Source:
+
+- `Day 1 Alpha UI and Addons Update`:
+  <https://www.bluetracker.gg/wow/topic/us-en/2177122-day-1-alpha-ui-and-addons-update/>
+
+Why it matters:
+
+- This is the clearest Midnight-specific note about chat and addon comms.
+- Blizzard said the initial lockdown on parsing chat and addon comms in
+  instances was too broad.
+- They said they would narrow it so the new logic only applies while there is
+  an active raid encounter or Mythic+ run underway.
+
+What that means for us:
+
+- For Midnight, pre-run and post-run signaling may be more workable than the
+  original alpha wording suggested.
+- During an active Mythic+ run, addon-based communication is still the riskiest
+  place to anchor a transport.
+
+### 2. Midnight planned API change summary
+
+Date: surfaced in Public Alpha documentation, still indexed in 2026
+
+Source:
+
+- `Patch 12.0.0/Planned API changes`:
+  <https://warcraft.wiki.gg/wiki/Patch_12.0.0/Planned_API_changes>
+
+Important note:
+
+- This page is community-maintained, not an official Blizzard domain.
+- It is still useful because it aggregates the Midnight API communication notes
+  into one place.
+
+Why it matters:
+
+- It explicitly summarizes the Midnight rule that, in instances, chat payloads
+  reaching Lua can become Secret Values and addons are not allowed to send
+  communications to other players through either addon comms or regular chat.
+- It also states that combat log events are no longer available to addons.
+
+What that means for us:
+
+- The generic pre-Midnight idea of hiding payloads inside addon comm traffic is
+  even less attractive under Midnight.
+- A visual outbound path like screenshot or pixel transport becomes more
+  attractive because it is orthogonal to the new comm restrictions.
+
+### 3. Blizzard developer-doc entry point for Midnight APIs
+
+Date: November 15, 2025 forum answer
+
+Source:
+
+- `Is there a place to get a list of API changes with Midnight?`:
+  <https://us.forums.blizzard.com/en/wow/t/is-there-a-place-to-get-a-list-of-api-changes-with-midnight/2200149>
+
+Why it matters:
+
+- A UI and Macro forum reply points developers to two places:
+  the `Documentation` addon available in-game through `/api`, and the Warcraft
+  Wiki API changes page.
+
+What that means for us:
+
+- If we prototype this further, we should treat the in-client `Documentation`
+  addon as the authoritative place to verify any specific API behavior in the
+  current Midnight build.
+
+### 4. Midnight-specific community examples already leaning on companions
+
+These are not authoritative API docs, but they are useful directional signals.
+
+#### Archon / Warcraft Logs Companion
+
+Source:
+
+- <https://www.archon.gg/wow/articles/help/companion>
+
+What it shows:
+
+- As of March 13, 2026, the Warcraft Logs Companion is still positioned around
+  an Overwolf-powered overlay and in-game applicant lookup experience.
+- The pattern remains "desktop/overlay companion beside the game", not "push a
+  desktop payload directly back through addon comms".
+
+#### MidnightHUD
+
+Source:
+
+- <https://www.curseforge.com/wow/addons/midnighthud>
+
+What it shows:
+
+- As of May 28, 2026, the author documents experimental `KeyRGB` /
+  `MidnightRGB` projects that require an external `MidnightRGBBridge` app from
+  the Microsoft Store.
+- That is another Midnight-era signal that addon authors are comfortable using
+  external bridge apps when they want capabilities beyond standard addon limits.
+
+#### MidnightUI + MPI Companion
+
+Source:
+
+- <https://www.curseforge.com/wow/addons/midnightui-midnight-ready>
+
+What it shows:
+
+- The project explicitly markets an `MPI Companion` and says a tiny helper addon
+  auto-toggles `/combatlog` so the companion can capture runs.
+- That is not our exact use case, but it is another Midnight-specific example
+  where the solution is "pair the addon with a companion pipeline", not "expect
+  addon comms alone to solve external data flow".
+
 ## Ranked options for lnnrank's current focus
 
 ### 1. Event-driven screenshot/QR transport
