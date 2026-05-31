@@ -15,6 +15,13 @@ start with:
 - `addon-to-app-options.md`
   Focused transport ranking for sending lookup payloads from the running addon
   to the local app without `/reload`.
+- `memory-scan-prototype.md`
+  Notes for the read-only memory scanning spike and how it maps to a possible
+  hidden self-channel transport.
+- `memory-string-host.js`
+  Synthetic process that keeps a fake channel/message envelope alive in memory.
+- `scan-process-string.ps1`
+  Read-only process scanner for distinctive strings and nearby preview text.
 - `watch-chatlog-latency.js`
   Tails `WoWChatLog.txt`, parses new lines, and estimates how long it took them
   to arrive after their embedded timestamp.

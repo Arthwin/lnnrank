@@ -8,6 +8,7 @@
 
 Core.lua
 Settings.lua
+PassiveChannel.lua
 Interactions.lua
 Collectors.lua
 MinimapButton.lua

@@ -13,6 +13,7 @@ local defaults = {
         scanGroupMembers = true,
         scanApplicants = true,
         minimapAngle = 225,
+        passiveChannelEnabled = false,
     },
     requests = {},
     groupMembers = {},
@@ -47,10 +48,6 @@ local function getDb()
         _G.lnnrankDB = {}
     end
     copyDefaults(_G.lnnrankDB, defaults)
-    if type(_G.lnnrankDB.settings) == "table" then
-        _G.lnnrankDB.settings.passiveChannelEnabled = nil
-        _G.lnnrankDB.settings.passiveChannelName = nil
-    end
     return _G.lnnrankDB
 end
 
@@ -553,7 +550,33 @@ local function handleSlashCommand(message)
         return
     end
 
-    addon.Print("commands: /lnnrank status | searching on/off | combat on/off | group on/off | applicants on/off | rescan")
+    if command == "passive" then
+        if value == "on" and type(addon.SetPassiveChannelEnabled) == "function" then
+            addon.SetPassiveChannelEnabled(true)
+            addon.Print("Passive self-channel bridge enabled.")
+            return
+        end
+
+        if value == "off" and type(addon.SetPassiveChannelEnabled) == "function" then
+            addon.SetPassiveChannelEnabled(false)
+            addon.Print("Passive self-channel bridge disabled.")
+            return
+        end
+
+        if type(addon.GetPassiveChannelDebugState) == "function" then
+            local passive = addon.GetPassiveChannelDebugState()
+            addon.Print(string.format(
+                "passive=%s joined=%s channel=%s seq=%d",
+                passive.enabled and "on" or "off",
+                passive.joined and "yes" or "no",
+                passive.channelName or "none",
+                passive.sequence or 0
+            ))
+            return
+        end
+    end
+
+    addon.Print("commands: /lnnrank status | searching on/off | combat on/off | group on/off | applicants on/off | passive on/off/status | rescan")
 end
 
 SLASH_LNNRANK1 = "/lnnrank"
