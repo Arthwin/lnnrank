@@ -29,6 +29,7 @@ function createEmptyParsedSavedVariables() {
     requests: [],
     groupMembers: [],
     applicants: [],
+    passiveBridge: null,
     lastImportedBuild: null,
   };
 }
@@ -40,6 +41,7 @@ function renderEmptySavedVariablesFile() {
     '  ["requests"] = {},',
     '  ["groupMembers"] = {},',
     '  ["applicants"] = {},',
+    '  ["passiveBridge"] = {},',
     "}",
     "",
   ].join("\n");
@@ -277,6 +279,30 @@ function parseSnapshotEntries(block) {
   ]);
 }
 
+function parsePassiveBridge(block) {
+  if (block == null) {
+    return null;
+  }
+
+  const passiveBridge = {
+    enabled: extractScalarField(block, "enabled"),
+    joined: extractScalarField(block, "joined"),
+    channelName: extractScalarField(block, "channelName"),
+    playerKey: extractScalarField(block, "playerKey"),
+    playerGuid: extractScalarField(block, "playerGuid"),
+    playerName: extractScalarField(block, "playerName"),
+    realm: extractScalarField(block, "realm"),
+    region: extractScalarField(block, "region"),
+    sessionId: extractScalarField(block, "sessionId"),
+    sequence: extractScalarField(block, "sequence"),
+    lastPublishedAt: extractScalarField(block, "lastPublishedAt"),
+    lastPublishedPayload: extractScalarField(block, "lastPublishedPayload"),
+    updatedAt: extractScalarField(block, "updatedAt"),
+  };
+
+  return Object.values(passiveBridge).some((value) => value != null) ? passiveBridge : null;
+}
+
 function parseLnnrankSavedVariables(text) {
   const rootBlock = extractTableBlock(text, "lnnrankDB");
   if (rootBlock == null) {
@@ -287,6 +313,7 @@ function parseLnnrankSavedVariables(text) {
   const settingsBlock = extractTableBlock(rootBlock, "settings");
   const groupMembersBlock = extractTableBlock(rootBlock, "groupMembers");
   const applicantsBlock = extractTableBlock(rootBlock, "applicants");
+  const passiveBridgeBlock = extractTableBlock(rootBlock, "passiveBridge");
 
   return {
     settings: {
@@ -294,10 +321,12 @@ function parseLnnrankSavedVariables(text) {
       showInCombat: settingsBlock == null ? null : extractScalarField(settingsBlock, "showInCombat"),
       scanGroupMembers: settingsBlock == null ? null : extractScalarField(settingsBlock, "scanGroupMembers"),
       scanApplicants: settingsBlock == null ? null : extractScalarField(settingsBlock, "scanApplicants"),
+      passiveChannelEnabled: settingsBlock == null ? null : extractScalarField(settingsBlock, "passiveChannelEnabled"),
     },
     requests: requestsBlock == null ? [] : parseRequestEntries(requestsBlock),
     groupMembers: groupMembersBlock == null ? [] : parseSnapshotEntries(groupMembersBlock),
     applicants: applicantsBlock == null ? [] : parseSnapshotEntries(applicantsBlock),
+    passiveBridge: parsePassiveBridge(passiveBridgeBlock),
     lastImportedBuild: extractScalarField(rootBlock, "lastImportedBuild"),
   };
 }

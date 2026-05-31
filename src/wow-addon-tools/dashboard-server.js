@@ -112,6 +112,18 @@ function latestIso(left, right) {
   return rightMs >= leftMs ? right : left;
 }
 
+function normalizePassiveBridge(passiveBridge) {
+  if (!passiveBridge || typeof passiveBridge !== "object") {
+    return null;
+  }
+
+  return {
+    ...passiveBridge,
+    lastPublishedAtIso: toIsoFromUnix(passiveBridge.lastPublishedAt),
+    updatedAtIso: toIsoFromUnix(passiveBridge.updatedAt),
+  };
+}
+
 function buildUnifiedQueue(cache, savedQueue) {
   const statusEntries = new Map(
     listRequestStatuses(cache).map((entry) => [entry.key || buildCacheKey(entry.region, entry.realm, entry.name), entry])
@@ -239,6 +251,7 @@ function buildDashboardState(options = {}) {
     queue,
     groupMembers: enrichCharacters(savedVariables.parsed.groupMembers, cache),
     applicants: enrichCharacters(savedVariables.parsed.applicants, cache),
+    passiveBridge: normalizePassiveBridge(savedVariables.parsed.passiveBridge),
     autoSync: options.autoSyncState || {
       isRunning: false,
       lastStartedAt: null,

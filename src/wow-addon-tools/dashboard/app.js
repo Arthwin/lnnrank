@@ -1,4 +1,4 @@
-const TAB_IDS = new Set(["stats", "results", "queue", "lfg"]);
+const TAB_IDS = new Set(["stats", "results", "queue", "lfg", "passive"]);
 const VIEW_STATE_STORAGE_KEY = "lnnrank-dashboard-view";
 const RESULTS_PAGE_SIZE = 20;
 const STATUS_PAGE_SIZE = 10;
@@ -321,6 +321,21 @@ function createSummaryItem(label, value) {
       <span class="summary-label">${escapeHtml(label)}</span>
       <strong class="summary-value">${escapeHtml(value)}</strong>
     </article>
+  `;
+}
+
+function createDetailRow(label, value, options = {}) {
+  const classes = ["detail-value"];
+  if (options.code) {
+    classes.push("detail-value-code");
+  }
+  const displayValue = value == null || value === "" ? "Unknown" : value;
+
+  return `
+    <div class="detail-row">
+      <span class="detail-label">${escapeHtml(label)}</span>
+      <span class="${classes.join(" ")}">${escapeHtml(displayValue)}</span>
+    </div>
   `;
 }
 
@@ -722,6 +737,92 @@ function renderStatuses(data) {
     .join("");
 }
 
+function renderPassive(data) {
+  const target = document.getElementById("passiveView");
+  if (!target) {
+    return;
+  }
+
+  const passive = data.passiveBridge;
+  if (!passive) {
+    target.innerHTML = `
+      <section class="card">
+        <div class="card-head">
+          <h2>Passive Self-Channel</h2>
+          <p>The addon has not written passive channel state into SavedVariables yet.</p>
+        </div>
+        ${createEmpty("Run /reload once after loading the addon, then open this tab again.")}
+      </section>
+    `;
+    return;
+  }
+
+  const statusLabel = !passive.enabled ? "Disabled" : passive.joined ? "Joined" : "Enabled";
+  const lastSavedVariablesFlush =
+    data.meta && data.meta.savedVariablesUpdatedAt
+      ? formatDate(data.meta.savedVariablesUpdatedAt)
+      : "Waiting for the next /reload or logout.";
+  const lastPayload =
+    typeof passive.lastPublishedPayload === "string" && passive.lastPublishedPayload.trim() !== ""
+      ? passive.lastPublishedPayload
+      : null;
+  const playerLabel = [passive.playerName, passive.realm].filter(Boolean).join("-") || "Unknown";
+  const regionLabel = passive.region ? String(passive.region).toUpperCase() : "Unknown";
+
+  target.innerHTML = `
+    <section class="card">
+      <div class="card-head">
+        <h2>Passive Self-Channel</h2>
+        <p>This tab reflects the addon's persisted bridge state. Channel changes and payload snapshots appear here after WoW flushes SavedVariables.</p>
+      </div>
+      <div class="summary-grid passive-summary-grid">
+        ${createSummaryItem("Status", statusLabel)}
+        ${createSummaryItem("Sequence", formatCompactNumber(passive.sequence ?? 0, 0))}
+        ${createSummaryItem(
+          "Last Publish",
+          passive.lastPublishedAtIso ? formatDate(passive.lastPublishedAtIso) : "None yet"
+        )}
+        ${createSummaryItem("SavedVariables", lastSavedVariablesFlush)}
+      </div>
+    </section>
+
+    <div class="queue-layout passive-layout">
+      <section class="card">
+        <div class="card-head">
+          <h2>Channel Identity</h2>
+          <p>The app can use this player-specific marker to watch outbound payloads.</p>
+        </div>
+        <div class="detail-list">
+          ${createDetailRow("Channel", passive.channelName || "Unknown", { code: true })}
+          ${createDetailRow("Player Key", passive.playerKey || "Unknown", { code: true })}
+          ${createDetailRow("Session", passive.sessionId || "Unknown", { code: true })}
+          ${createDetailRow("Player", playerLabel)}
+          ${createDetailRow("Region", regionLabel)}
+          ${createDetailRow("GUID", passive.playerGuid || "Unknown", { code: true })}
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Latest Relay Snapshot</h2>
+          <p>The last outbound payload captured in the addon's SavedVariables snapshot.</p>
+        </div>
+        <div class="detail-list">
+          ${createDetailRow("Bridge Updated", passive.updatedAtIso ? formatDate(passive.updatedAtIso) : "Unknown")}
+          ${createDetailRow("Last Publish", passive.lastPublishedAtIso ? formatDate(passive.lastPublishedAtIso) : "None yet")}
+          ${createDetailRow("Joined Channel", passive.joined ? "Yes" : "No")}
+          ${createDetailRow("Enabled", passive.enabled ? "Yes" : "No")}
+        </div>
+        ${
+          lastPayload
+            ? `<pre class="code-block passive-payload">${escapeHtml(lastPayload)}</pre>`
+            : createEmpty("No passive payload has been persisted yet.")
+        }
+      </section>
+    </div>
+  `;
+}
+
 
 function getLfgEntryStatus(data, entry) {
   const statusMap = getStatusMap(data);
@@ -908,6 +1009,7 @@ function renderAll() {
   renderResults(state.data);
   renderQueue(state.data);
   renderStatuses(state.data);
+  renderPassive(state.data);
   renderRosterList("applicantList", state.data.applicants, "No LFG applicants in the last WoW snapshot.", state.data);
   applyActiveTab();
 }

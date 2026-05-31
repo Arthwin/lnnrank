@@ -45,6 +45,7 @@ lnnrankDB = {
     ["showInCombat"] = true,
     ["scanGroupMembers"] = true,
     ["scanApplicants"] = true,
+    ["passiveChannelEnabled"] = true,
   },
   ["requests"] = {
     ["us:stormrage:urmomgargles"] = {
@@ -79,6 +80,21 @@ lnnrankDB = {
       ["lastSeenAt"] = 1748650300,
     },
   },
+  ["passiveBridge"] = {
+    ["enabled"] = true,
+    ["joined"] = true,
+    ["channelName"] = "lnnrankf24cf41109",
+    ["playerKey"] = "0f24cf41",
+    ["playerGuid"] = "Player-3676-0F24CF41",
+    ["playerName"] = "Urmomgargles",
+    ["realm"] = "Stormrage",
+    ["region"] = "us",
+    ["sessionId"] = "f24cf41109",
+    ["sequence"] = 4,
+    ["lastPublishedAt"] = 1748650400,
+    ["lastPublishedPayload"] = "LNNRANK|ch=lnnrankf24cf41109|ss=f24cf41109|n=4|rg=us|re=Stormrage|nm=Urmomgargles|sr=unit",
+    ["updatedAt"] = 1748650401,
+  },
   ["lastImportedBuild"] = "2026-05-31T00:00:00.000Z",
 }
 `;
@@ -91,10 +107,14 @@ lnnrankDB = {
   assert.equal(parsed.requests[0].seenCount, 2);
   assert.equal(parsed.settings.scanGroupMembers, true);
   assert.equal(parsed.settings.scanApplicants, true);
+  assert.equal(parsed.settings.passiveChannelEnabled, true);
   assert.equal(parsed.groupMembers[0].characterName, "Charby");
   assert.equal(parsed.groupMembers[0].unitToken, "raid3");
   assert.equal(parsed.applicants[0].characterName, "Redsolo");
   assert.equal(parsed.applicants[0].applicantID, 42);
+  assert.equal(parsed.passiveBridge.channelName, "lnnrankf24cf41109");
+  assert.equal(parsed.passiveBridge.playerKey, "0f24cf41");
+  assert.equal(parsed.passiveBridge.sequence, 4);
 });
 
 test("saved variables queue clearing preserves non-queue snapshot data", () => {
@@ -495,10 +515,10 @@ test("dashboard auto sync recovers after an earlier queue-empty skip", async () 
     "utf8"
   );
 
-  function writeSavedVariables(requestBlock) {
+  function writeSavedVariables(requestBlock, passiveBridgeBlock = "") {
     fs.writeFileSync(
       savedVariablesFile,
-      `lnnrankDB = {\n  ["requests"] = {\n${requestBlock}\n  },\n}\n`,
+      `lnnrankDB = {\n  ["requests"] = {\n${requestBlock}\n  },\n  ["passiveBridge"] = {\n${passiveBridgeBlock}\n  },\n}\n`,
       "utf8"
     );
   }
@@ -559,6 +579,24 @@ test("dashboard auto sync recovers after an earlier queue-empty skip", async () 
     assert.equal(lastSyncOptions.provider, "api");
     assert.equal(lastSyncOptions.requests[0].statusSource, "applicant");
     assert.equal(lastSyncOptions.requests[0].characterName, "Urmomgargles");
+
+    writeSavedVariables(
+      "",
+      '    ["enabled"] = true,\n' +
+        '    ["joined"] = true,\n' +
+        '    ["channelName"] = "lnnrankf24cf41109",\n' +
+        '    ["playerKey"] = "0f24cf41",\n' +
+        '    ["sessionId"] = "f24cf41109",\n' +
+        '    ["sequence"] = 4,\n' +
+        '    ["lastPublishedPayload"] = "LNNRANK|ch=lnnrankf24cf41109",\n' +
+        '    ["updatedAt"] = 1748650401,'
+    );
+
+    const stateResponse = await fetch(`http://127.0.0.1:${port}/api/state`);
+    const statePayload = await stateResponse.json();
+    assert.equal(statePayload.passiveBridge.channelName, "lnnrankf24cf41109");
+    assert.equal(statePayload.passiveBridge.playerKey, "0f24cf41");
+    assert.equal(statePayload.passiveBridge.updatedAtIso, "2025-05-31T00:13:21.000Z");
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

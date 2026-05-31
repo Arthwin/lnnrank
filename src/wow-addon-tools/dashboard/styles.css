@@ -732,6 +732,56 @@ code {
   font-family: "Cascadia Code", "Consolas", monospace;
 }
 
+.passive-summary-grid .summary-value {
+  font-size: 1.1rem;
+  line-height: 1.35;
+}
+
+.passive-layout {
+  align-items: stretch;
+}
+
+.detail-list {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.detail-row {
+  display: grid;
+  gap: 0.22rem;
+  padding: 0.9rem 1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.64);
+  border: 1px solid var(--line);
+}
+
+.detail-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.detail-value {
+  word-break: break-word;
+}
+
+.detail-value-code,
+.code-block {
+  font-family: "Cascadia Code", "Consolas", monospace;
+}
+
+.code-block {
+  margin: 1rem 0 0;
+  padding: 1rem;
+  border-radius: 18px;
+  background: rgba(31, 42, 34, 0.92);
+  color: #f5efe3;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .empty {
   padding: 1rem;
   border-radius: 18px;

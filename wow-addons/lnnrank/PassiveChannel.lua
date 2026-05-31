@@ -17,6 +17,7 @@ local filtersInstalled = false
 local lastPublishedAt = nil
 local lastPublishedPayload = nil
 local passiveChannelName = nil
+local passivePlayerKey = nil
 local passiveSessionId = nil
 local publishSequence = 0
 
@@ -42,6 +43,25 @@ local function buildPassiveSessionId()
     local guid = sanitizeSegment(UnitGUID("player") or "noguid", 20):lower()
     local now = tostring(getNowUnix())
     return string.format("%s%s", guid:sub(-6), now:sub(-4))
+end
+
+local function buildPassivePlayerKey()
+    if passivePlayerKey then
+        return passivePlayerKey
+    end
+
+    local guid = type(UnitGUID) == "function" and UnitGUID("player") or nil
+    local guidSuffix = type(guid) == "string" and guid:match("Player%-%x+%-(%x+)$") or nil
+    local fallbackName = type(UnitName) == "function" and UnitName("player") or "player"
+    local fallbackRealm = type(GetRealmName) == "function" and GetRealmName() or "realm"
+    local rawKey = guidSuffix or guid or string.format("%s_%s", fallbackRealm or "realm", fallbackName or "player")
+
+    passivePlayerKey = sanitizeSegment(rawKey, 24):lower()
+    if passivePlayerKey == "" then
+        passivePlayerKey = "unknown"
+    end
+
+    return passivePlayerKey
 end
 
 local function buildPassiveChannelName()
@@ -146,6 +166,33 @@ local function ensurePassiveChannel()
     return nil
 end
 
+local function getPassiveBridgeTable()
+    local db = addon.GetDb()
+    if type(db.passiveBridge) ~= "table" then
+        db.passiveBridge = {}
+    end
+    return db.passiveBridge
+end
+
+local function syncPassiveBridgeState()
+    local channelName = passiveChannelName or buildPassiveChannelName()
+    local bridge = getPassiveBridgeTable()
+
+    bridge.enabled = addon.IsPassiveChannelEnabled()
+    bridge.joined = getPassiveChannelNumber(channelName) ~= nil
+    bridge.channelName = channelName
+    bridge.playerKey = buildPassivePlayerKey()
+    bridge.playerGuid = type(UnitGUID) == "function" and UnitGUID("player") or nil
+    bridge.playerName = type(UnitName) == "function" and UnitName("player") or nil
+    bridge.realm = type(GetRealmName) == "function" and GetRealmName() or nil
+    bridge.region = type(addon.GetCurrentRegionSlug) == "function" and addon.GetCurrentRegionSlug() or "us"
+    bridge.sessionId = passiveSessionId or buildPassiveSessionId()
+    bridge.sequence = publishSequence
+    bridge.lastPublishedAt = lastPublishedAt
+    bridge.lastPublishedPayload = lastPublishedPayload
+    bridge.updatedAt = getNowUnix()
+end
+
 local function buildPayload(request)
     publishSequence = publishSequence + 1
 
@@ -175,22 +222,26 @@ function addon.SetPassiveChannelEnabled(enabled)
     addon.GetDb().settings.passiveChannelEnabled = enabled == true
     if enabled == true then
         ensurePassiveChannel()
+        syncPassiveBridgeState()
         return
     end
 
     if passiveChannelName and type(LeaveChannelByName) == "function" then
         pcall(LeaveChannelByName, passiveChannelName)
     end
+    syncPassiveBridgeState()
 end
 
 function addon.GetPassiveChannelDebugState()
     local channelName = passiveChannelName or buildPassiveChannelName()
+    syncPassiveBridgeState()
     return {
         channelName = channelName,
         enabled = addon.IsPassiveChannelEnabled(),
         joined = getPassiveChannelNumber(channelName) ~= nil,
         lastPublishedAt = lastPublishedAt,
         lastPublishedPayload = lastPublishedPayload,
+        playerKey = buildPassivePlayerKey(),
         sequence = publishSequence,
         sessionId = passiveSessionId or buildPassiveSessionId(),
     }
@@ -213,6 +264,7 @@ function addon.TryPublishRequestToPassiveChannel(request)
         lastPublishedPayload = payload
         hideChannelEverywhere(passiveChannelName)
     end
+    syncPassiveBridgeState()
 
     return ok
 end
@@ -223,6 +275,7 @@ passiveFrame:RegisterEvent("CHANNEL_UI_UPDATE")
 passiveFrame:SetScript("OnEvent", function(_, event)
     if event == "CHANNEL_UI_UPDATE" and passiveChannelName then
         hideChannelEverywhere(passiveChannelName)
+        syncPassiveBridgeState()
         return
     end
 
@@ -230,4 +283,5 @@ passiveFrame:SetScript("OnEvent", function(_, event)
     if addon.IsPassiveChannelEnabled() then
         ensurePassiveChannel()
     end
+    syncPassiveBridgeState()
 end)

@@ -18,6 +18,7 @@ local defaults = {
     requests = {},
     groupMembers = {},
     applicants = {},
+    passiveBridge = {},
     lastImportedBuild = nil,
     pendingOpenLfgOnLogin = false,
 }
@@ -566,10 +567,11 @@ local function handleSlashCommand(message)
         if type(addon.GetPassiveChannelDebugState) == "function" then
             local passive = addon.GetPassiveChannelDebugState()
             addon.Print(string.format(
-                "passive=%s joined=%s channel=%s seq=%d",
+                "passive=%s joined=%s channel=%s key=%s seq=%d",
                 passive.enabled and "on" or "off",
                 passive.joined and "yes" or "no",
                 passive.channelName or "none",
+                passive.playerKey or "none",
                 passive.sequence or 0
             ))
             return
