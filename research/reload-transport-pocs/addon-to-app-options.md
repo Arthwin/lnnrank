@@ -317,6 +317,86 @@ Why it is risky:
 - Changes the trust model from "helper companion" to "process memory reader".
 - Even read-only access will be a much higher support and perception burden.
 
+#### How hard is arbitrary string scanning?
+
+Short answer:
+
+- easier than building a robust overlay
+- harder than building a clean screenshot watcher
+- much easier live than by creating repeated dump files
+
+Public implementation signals:
+
+- Microsoft documents the core primitives:
+  `OpenProcess`, `VirtualQueryEx`, and `ReadProcessMemory`.
+- Jerry Coffin's example gist shows the standard pattern:
+  enumerate memory regions with `VirtualQueryEx`, read them, and run a normal
+  string search over the bytes.
+- Generic scanners such as `Memory-Scanner`, `Pymem`, and `ReadWriteMemory`
+  show that process-wide string scans are common and not exotic to prototype.
+
+Sources:
+
+- `OpenProcess`:
+  <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess>
+- `VirtualQueryEx`:
+  <https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualqueryex>
+- `ReadProcessMemory`:
+  <https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-readprocessmemory>
+- Jerry Coffin string-scan gist:
+  <https://gist.github.com/Mikulas/2551307>
+- `Memory-Scanner`:
+  <https://github.com/JulianOzelRose/Memory-Scanner>
+- `Pymem`:
+  <https://github.com/srounet/Pymem>
+- `ReadWriteMemory`:
+  <https://github.com/vsantiago113/ReadWriteMemory>
+
+What makes it harder in WoW than in a toy example:
+
+- You need a highly distinctive marker such as a nonce-prefixed payload, not a
+  plain character name or realm string.
+- You may need to search both UTF-8 and UTF-16 representations depending on
+  where the string ends up.
+- The same text can exist in more than one place: chat history, frame text,
+  Lua string storage, copied buffers, and previous payloads.
+- The address is unlikely to be stable across launches, reloads, or payload
+  shape changes unless we deliberately engineer a fixed buffer pattern.
+
+What I would infer from the public repos:
+
+- Prototyping a one-off "can I find this marker in WoW memory right now?" tool
+  is probably a day-scale task, not a month-scale task.
+- Turning that into a supportable transport that survives restarts, client
+  patches, and false positives is the real work.
+
+#### Dumps versus live scanning
+
+If the idea is "make the addon emit a marker, dump process memory, then search
+the dump for that string", it is probably the wrong form of the idea.
+
+Why:
+
+- Windows dump tooling can include full memory, but that is a heavyweight step
+  compared with reading live committed regions directly.
+- For a repeated <=10 second transport loop, constantly writing dump files would
+  be slower, noisier, and operationally uglier than a live reader.
+
+Sources:
+
+- User-mode dump options:
+  <https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/-dump--create-dump-file->
+- ProcDump:
+  <https://learn.microsoft.com/en-us/sysinternals/downloads/procdump>
+
+Practical conclusion:
+
+- If we ever test the memory-reader route, do **live scanning**, not periodic
+  dump creation.
+- If we want to de-risk the memory route, design the addon payload around a
+  unique sentinel like `LNNRANK|<nonce>|<seq>|...` so the reader can verify a
+  real hit instead of guessing at arbitrary strings.
+
 Verdict:
 
 - Keep as the fastest technical fallback, not the default direction.
