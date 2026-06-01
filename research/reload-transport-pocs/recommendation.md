@@ -5,6 +5,10 @@ Date: 2026-05-31
 If the current question is only **addon -> desktop app**, see
 `addon-to-app-options.md` first.
 
+This note captures the earlier recommendation pass before the repo gained its
+current experimental passive self-channel memory-scan prototype. For the live
+prototype that now exists in code, see `memory-scan-prototype.md`.
+
 ## Bottom line
 
 If the goal is **true no-reload live updates**, the viable path is:

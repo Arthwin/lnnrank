@@ -4,12 +4,13 @@ Date: 2026-06-01
 
 ## Goal
 
-This prototype answers a narrow question:
+This prototype started by answering a narrow question:
 
 - can we keep a distinctive transport marker in a live process
 - and can a local helper find that marker with read-only memory scanning
 
-It does not touch WoW yet. It is a lab for the scanner itself.
+It began as a scanner-only lab. The repo now also includes an experimental WoW
+passive self-channel transport that uses the same idea.
 
 ## Files
 
@@ -20,6 +21,16 @@ It does not touch WoW yet. It is a lab for the scanner itself.
   A read-only PowerShell scanner that walks readable memory regions with
   `OpenProcess`, `VirtualQueryEx`, and `ReadProcessMemory`, then searches for a
   target string.
+
+Current repo integration:
+
+- `wow-addons/lnnrank/PassiveChannel.lua`
+  The addon-side passive self-channel publisher.
+- `src/wow-addon-tools/passive-live-feed.js`
+  The dashboard-side monitor that normalizes live payload hits into clean
+  relay log entries.
+- `src/wow-addon-tools/passive-live-scanner/`
+  The Windows helper used by the app for discovery and fast rereads.
 
 ## Quick start
 
@@ -65,15 +76,11 @@ That is enough to prove the basic idea:
 
 ## How this maps to WoW
 
-If the scanner continues to look reliable, the next experimental addon-side
-shape would be:
+The repo now has that addon-side shape in place:
 
 1. auto-create a unique temporary self-channel name
 2. publish compact request envelopes into that channel
 3. search WoW memory for the channel name or the payload prefix
-
-There is now an opt-in addon-side prototype for that shape in
-`wow-addons/lnnrank/PassiveChannel.lua`.
 
 Prototype control:
 
@@ -89,17 +96,25 @@ Current intent:
 - hide that channel from visible chat windows as best we can
 - publish compact self-channel payloads from the existing
   `TryPublishRequestToPassiveChannel(request)` seam
+- let the dashboard turn live payload hits into queue and LFG state immediately
+
+Current app-side view:
+
+- the Passive tab shows a compact stats strip and a clean relay log
+- live payloads and `SavedVariables` message snapshots are merged into one log
+- the live queue can advance before the next `/reload`
 
 Important caveat:
 
-- this is still experimental and unverified in a live WoW client
+- this is still experimental even though live world/unit payload capture is now
+  working on this machine
 - `CHANNEL` sending rules may still limit which queue sources can publish
 
-The most important implementation detail is the payload shape. It should be
-highly distinctive, for example:
+The most important implementation detail is the payload shape. The repo now uses
+a distinctive fixed envelope:
 
 ```text
-LNNRANK|channel=lnnrank9ab3...|session=...|seq=42|message=...
+LNNRANK|ch=lnnrank9ab3...|ss=...|n=42|rg=us|re=Stormrage|nm=Target|sr=world
 ```
 
 That gives the scanner a better anchor than a plain player name or realm.

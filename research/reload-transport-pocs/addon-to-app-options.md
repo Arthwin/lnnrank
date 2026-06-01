@@ -17,10 +17,22 @@ It is intentionally not about importing results back into the running addon.
 - `wow-addons/lnnrank/Collectors.lua`
 
 Both paths call `addon.TryPublishRequestToPassiveChannel(request)` after a
-lookup is queued. That function is not implemented today, which means we can
-add an outgoing transport without rewriting the queueing rules first.
+lookup is queued. That function is now implemented as an experimental passive
+self-channel publisher, which means the repo already has a working seam for
+outgoing transport without rewriting the queueing rules first.
 
-That makes the current addon shape a good fit for a transport prototype.
+Current repo status:
+
+- `wow-addons/lnnrank/PassiveChannel.lua` publishes compact
+  `LNNRANK|ch=...|ss=...|n=...|rg=...|re=...|nm=...|sr=...` envelopes.
+- `src/wow-addon-tools/passive-live-feed.js` plus
+  `src/wow-addon-tools/passive-live-scanner/` watch the running WoW process
+  read-only and normalize those payloads into a live relay log.
+- The dashboard can already turn matching live payloads into queue and LFG
+  state before the next `SavedVariables` flush.
+
+That makes the current addon shape a good fit for continuing transport
+experiments inside the real app, not just isolated POCs.
 
 ## Constraints that still matter
 
@@ -482,22 +494,21 @@ Verdict:
    transport next.
 4. Keep whisper/chat-log transport as a low-effort debug path only.
 
-### Concrete repo tasks
+### Remaining repo tasks
 
-1. Add a tiny transport module in the addon that serializes a lookup request
-   into a compact payload and exposes a `TryPublishRequestToPassiveChannel`
-   implementation.
-2. Add a repo-local watcher/decoder in `src/wow-addon-tools` that consumes that
-   payload and pushes it into the existing lookup queue.
-3. Add an app-side "live outbound transport" mode flag so this can coexist with
-   the current SavedVariables flow.
-4. Add a latency test script that records:
-   addon queue time -> screenshot or frame seen -> decode time -> app queue time
+1. Measure real latency for each queue source:
+   addon queue time -> live feed seen -> app queue time -> sync completion time.
+2. Verify which sources survive `CHANNEL` restrictions consistently:
+   manual `Ctrl-click`, world, chat-link, applicant, and any automated cases.
+3. Decide whether to harden the current memory-reader path or pivot to
+   screenshot/QR for a lower-risk long-term transport.
+4. Add a compact app-side history/export story if the passive relay becomes a
+   normal workflow rather than a lab feature.
 
 ## Bottom line
 
 If the only goal right now is **addon -> app** within about 10 seconds, the
-best current path is:
+best long-term path still looks like:
 
 1. screenshot/QR first
 2. pixel-strip second
@@ -505,3 +516,13 @@ best current path is:
 
 Visible whisper or chat-log tricks are still worth understanding, but they look
 much more like debug hacks than a good long-term transport for `lnnrank`.
+
+If the question is "what is already implemented in this repo today?", the
+answer is different:
+
+1. experimental passive self-channel publisher in the addon
+2. read-only memory scan in the desktop app
+3. live queue / LFG wiring in the dashboard
+
+That does not make the memory-reader path the final recommendation, but it is
+the current prototype that exists in code.

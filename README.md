@@ -1,11 +1,13 @@
-# LÑÑRank
+# lnnrank
 
 `lnnrank` is a local Warcraft Logs powered World of Warcraft addon project with two main parts:
 
 - a Retail WoW addon in `wow-addons/lnnrank`
 - a local Node.js companion/dashboard stack in `src/wow-addon-tools`
 
-The system is intentionally **Warcraft Logs only**. Raider.IO, chat bridge, and other abandoned experiments are not part of the shipped behavior.
+The system is intentionally **Warcraft Logs only**. Raider.IO and older chat-log
+bridge experiments are not part of the main flow. The current experimental live
+transport work is the passive self-channel relay described below.
 
 ## What it does
 
@@ -13,16 +15,20 @@ The system is intentionally **Warcraft Logs only**. Raider.IO, chat bridge, and 
 - Lets the user queue refreshes from the addon without passive hover lookups.
 - Stores character results in a lightweight local JSON DB.
 - Generates a companion addon bundle that WoW loads on `/reload`.
-- Runs a local dashboard for queue, results, status, and LFG views.
+- Runs a local dashboard for queue, results, status, LFG, and passive relay
+  views.
+- Can optionally push outbound lookup requests from the addon to the desktop app
+  without `/reload` through an experimental passive self-channel relay.
 
 ## Core limitation
 
 WoW still requires `/reload` to:
 
-- flush addon `SavedVariables` requests to disk
 - import newly generated companion addon data back into the running client
 
-The project optimizes this flow, but it does not bypass WoW's reload boundary.
+The passive relay can bypass `/reload` for **addon -> app** request export, but
+it does not bypass WoW's import boundary for showing fresh results back inside a
+running addon.
 
 ## Repo layout
 
@@ -97,6 +103,31 @@ node src/wow-addon-tools/dev-run.js --reset-state
 node src/wow-addon-tools/dev-run.js --copy-saved-variables C:\path\to\lnnrank.lua
 ```
 
+## Passive relay (experimental)
+
+The repo now includes an experimental one-way live transport from the addon to
+the desktop app.
+
+Addon controls:
+
+```text
+/lnnrank passive on
+/lnnrank passive status
+/lnnrank passive off
+```
+
+What it does today:
+
+- opens a unique per-session self-channel
+- publishes compact `LNNRANK|...` lookup payloads when requests are queued
+- lets the dashboard watch those payloads live with a read-only memory scanner
+- feeds the app queue and LFG view before the next `SavedVariables` flush
+
+What it does not do:
+
+- it does not push fresh lookup results back into the running addon
+- it is still an experimental Windows-only transport path
+
 ## Environment variables
 
 - `WCL_CLIENT_ID`: Warcraft Logs API client ID
@@ -118,6 +149,8 @@ node src/wow-addon-tools/dev-run.js --copy-saved-variables C:\path\to\lnnrank.lu
 - Known data always displays when present, even if stale.
 - Queueing is explicit for most player surfaces via `Ctrl-click`.
 - LFG applicants auto-queue when they appear.
+- With passive relay enabled, outbound world/unit/chat-link/applicant lookups
+  can appear in the desktop app immediately.
 - Self can auto-refresh daily.
 - All lookup sources flow through one deterministic WCL gather pipeline.
 - Highest dungeon key data comes from a separate WCL by-level view, not the parse page.

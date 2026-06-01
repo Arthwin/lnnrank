@@ -1,7 +1,11 @@
 # Reload Transport POCs
 
-These are isolated throwaway probes for researching ways around WoW addon
-reload requirements without touching the main app or addon.
+These started as isolated probes for researching ways around WoW addon reload
+requirements without touching the main app or addon.
+
+Some of that work is now partially wired into the repo as an experimental
+passive self-channel relay, but this folder still exists as the historical lab
+notebook for that investigation.
 
 ## Current focus
 
@@ -9,6 +13,11 @@ If the current question is strictly **addon -> desktop app** live signaling,
 start with:
 
 - `addon-to-app-options.md`
+
+If the current question is "what is actually implemented in the repo right
+now?", also read:
+
+- `memory-scan-prototype.md`
 
 ## Files
 
