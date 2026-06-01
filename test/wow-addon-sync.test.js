@@ -634,9 +634,8 @@ test("live feed discovery pattern follows the active player channel across reloa
     buildPassiveDiscoveryPattern({
       channelName: "lnnrank0ff24cf4",
       playerKey: "0ff24cf4",
-      sessionId: "f24cf47371",
     }),
-    "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf47371"
+    "LNNRANK|ch=lnnrank0ff24cf4"
   );
 });
 

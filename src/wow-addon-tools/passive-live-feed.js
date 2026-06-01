@@ -322,11 +322,6 @@ function normalizePassiveDiscoveryToken(value) {
 function buildPassiveDiscoveryPattern(passiveBridge) {
   const channelName = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.channelName);
   const playerKey = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.playerKey);
-  const sessionId = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.sessionId);
-
-  if (channelName && sessionId) {
-    return `LNNRANK|ch=${channelName}|ss=${sessionId}`;
-  }
 
   if (channelName && playerKey && channelName.includes(playerKey)) {
     return `LNNRANK|ch=${channelName}`;
