@@ -4,6 +4,8 @@
   --ink: #1f2a22;
   --muted: #61706b;
   --line: rgba(31, 42, 34, 0.1);
+  --name-plate: rgba(65, 73, 78, 0.16);
+  --name-plate-line: rgba(31, 42, 34, 0.14);
   --accent: #0d6b5f;
   --accent-2: #e06a3c;
   --danger: #b63b3b;
@@ -269,6 +271,11 @@ th {
   display: inline-grid;
   gap: 0.18rem;
   min-width: 0;
+  padding: 0.36rem 0.58rem 0.42rem;
+  border-radius: 14px;
+  background: var(--name-plate);
+  border: 1px solid var(--name-plate-line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.32);
 }
 
 .wcl-character-link:hover,
@@ -666,6 +673,13 @@ th {
   flex-wrap: nowrap;
   white-space: nowrap;
   min-width: 0;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0.24rem 0.5rem 0.28rem;
+  border-radius: 14px;
+  background: var(--name-plate);
+  border: 1px solid var(--name-plate-line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.32);
 }
 
 .lfg-role-icon {

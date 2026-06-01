@@ -13,11 +13,16 @@ local defaults = {
         scanGroupMembers = true,
         scanApplicants = true,
         minimapAngle = 225,
+        savedEventBatchEnabled = true,
         passiveChannelEnabled = false,
     },
     requests = {},
     groupMembers = {},
     applicants = {},
+    eventBridge = {
+        sequence = 0,
+        events = {},
+    },
     passiveBridge = {},
     lastImportedBuild = nil,
     pendingOpenLfgOnLogin = false,
@@ -79,6 +84,19 @@ function addon.GetCurrentRegionSlug()
     end
 
     return "us"
+end
+
+function addon.IsSuppressedInCurrentInstance()
+    if type(IsInInstance) ~= "function" then
+        return false
+    end
+
+    local inInstance, instanceType = IsInInstance()
+    if not inInstance then
+        return false
+    end
+
+    return instanceType == "party" or instanceType == "raid"
 end
 
 function addon.NormalizeRealmKey(value)
@@ -600,6 +618,9 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "PLAYER_LOGIN" then
         if type(_G.lnnrankCompanionData) == "table" then
             addon.ImportCompanionData(_G.lnnrankCompanionData)
+        end
+        if type(addon.ResetSavedEventBatchForSession) == "function" then
+            addon.ResetSavedEventBatchForSession()
         end
         addon.RestoreLfgAfterReload()
     end

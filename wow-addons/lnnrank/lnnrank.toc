@@ -9,6 +9,7 @@
 Core.lua
 Settings.lua
 PassiveChannel.lua
+EventBridge.lua
 Interactions.lua
 Collectors.lua
 MinimapButton.lua

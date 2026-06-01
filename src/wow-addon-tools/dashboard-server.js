@@ -14,6 +14,7 @@ const {
   clearManualRequests,
   createEmptyCache,
   getCachedRecord,
+  getFreshCachedRecord,
   listCachedRecords,
   listManualRequests,
   listRequestStatuses,
@@ -36,12 +37,19 @@ const { runAddonRequestSync } = require("./sync-service");
 const { createPassiveLiveFeedMonitor } = require("./passive-live-feed");
 const {
   clearLnnrankSavedVariablesApplicants,
+  clearLnnrankSavedVariablesEventBatch,
   clearLnnrankSavedVariablesQueue,
   DEFAULT_WOW_ACCOUNT_ROOT,
   loadSavedVariablesSnapshot,
   pickLatestSavedVariablesFile,
   removeLnnrankSavedVariablesQueueEntry,
 } = require("./saved-variables");
+const {
+  buildAddonEventIdentity,
+  buildAddonEventPreview,
+  compareAddonEvents,
+  parseAddonEventPayload,
+} = require("./addon-event-format");
 
 const DEFAULT_PORT = Number.parseInt(process.env.WCL_DASHBOARD_PORT || "47832", 10);
 const DASHBOARD_ROOT = path.join(__dirname, "dashboard");
@@ -190,48 +198,27 @@ function parseUnixMillisecondsField(value) {
 }
 
 function parsePassivePayload(payload) {
-  if (typeof payload !== "string" || !payload.startsWith("LNNRANK|")) {
+  const event = parseAddonEventPayload(payload);
+  if (!event || event.eventType !== "search" || !event.realm || !event.characterName) {
     return null;
   }
-
-  const fields = {};
-  for (const segment of payload.split("|").slice(1)) {
-    const separatorIndex = segment.indexOf("=");
-    if (separatorIndex <= 0) {
-      continue;
-    }
-
-    const key = segment.slice(0, separatorIndex);
-    const value = segment.slice(separatorIndex + 1);
-    if (!key || !value) {
-      continue;
-    }
-    fields[key] = value;
-  }
-
-  if (!fields.re || !fields.nm) {
-    return null;
-  }
-
-  const sequence = Number.parseInt(fields.n || "", 10);
-  const timestampMs = parseUnixMillisecondsField(fields.t);
   return {
     payload,
-    channelName: fields.ch || null,
-    sessionId: fields.ss || null,
-    sequence: Number.isFinite(sequence) ? sequence : null,
-    timestampMs,
-    region: fields.rg || "us",
-    realm: fields.re,
-    characterName: fields.nm,
-    source: normalizePassiveSource(fields.sr) || "passive-live",
-    applicantID: parseIntegerField(fields.ai),
-    groupID: parseIntegerField(fields.gi) ?? fields.gi ?? null,
-    memberIndex: parseIntegerField(fields.mi),
-    assignedRole: fields.ar || null,
-    class: fields.cl || null,
-    itemLevel: parseDecimalField(fields.il),
-    level: parseIntegerField(fields.lv),
+    channelName: event.channelName || null,
+    sessionId: event.sessionId || null,
+    sequence: event.sequence,
+    timestampMs: event.capturedAtMs || null,
+    region: event.region || "us",
+    realm: event.realm,
+    characterName: event.characterName,
+    source: normalizePassiveSource(event.source) || "passive-live",
+    applicantID: event.applicantID != null ? event.applicantID : null,
+    groupID: event.groupID,
+    memberIndex: event.memberIndex,
+    assignedRole: event.assignedRole || null,
+    class: event.class || null,
+    itemLevel: event.itemLevel,
+    level: event.level,
   };
 }
 
@@ -262,6 +249,35 @@ function parsePassiveLiveEntries(passiveLiveFeedState) {
         eventAtMs,
         updatedAt: eventAtMs > 0 ? new Date(eventAtMs).toISOString() : eventAt,
         lastSeenAt: eventAtMs > 0 ? Math.floor(eventAtMs / 1000) : toUnixSecondsFromIso(eventAt),
+      };
+    })
+    .filter(Boolean);
+}
+
+function parsePassiveLiveEnvelopeEvents(passiveLiveFeedState) {
+  const liveEntries = getPassiveLiveSourceEntries(passiveLiveFeedState);
+
+  return liveEntries
+    .filter((entry) => entry && entry.kind === "payload" && typeof entry.preview === "string")
+    .map((entry) => {
+      const event = parseAddonEventPayload(entry.preview, {
+        fallbackTimestampMs: Date.parse(entry.eventAt || entry.firstSeenAt || entry.lastSeenAt || "") || 0,
+      });
+      if (!event) {
+        return null;
+      }
+
+      const eventAtMs = Number(event.capturedAtMs || 0);
+      const lastSeenAt =
+        eventAtMs > 0
+          ? Math.floor(eventAtMs / 1000)
+          : toUnixSecondsFromIso(entry.eventAt || entry.firstSeenAt || entry.lastSeenAt || "");
+      return {
+        ...event,
+        eventAtMs,
+        eventAt: event.capturedAt || entry.eventAt || entry.firstSeenAt || entry.lastSeenAt || null,
+        updatedAt: event.capturedAt || entry.eventAt || entry.firstSeenAt || entry.lastSeenAt || null,
+        lastSeenAt,
       };
     })
     .filter(Boolean);
@@ -304,7 +320,7 @@ function resolveActivePassiveSessionId(entries, fallbackSessionId) {
 }
 
 function buildPassiveLiveScope(passiveBridge, passiveLiveFeedState) {
-  const parsedEntries = parsePassiveLiveEntries(passiveLiveFeedState);
+  const parsedEntries = parsePassiveLiveEnvelopeEvents(passiveLiveFeedState);
   const preferredChannelName = passiveBridge && passiveBridge.channelName ? passiveBridge.channelName : null;
   const fallbackSessionId = passiveBridge && passiveBridge.sessionId;
 
@@ -602,7 +618,9 @@ function buildDashboardState(options = {}) {
   const passiveLiveQueue = Array.isArray(options.passiveLiveQueueOverride)
     ? [...options.passiveLiveQueueOverride]
     : filterActivePassiveLiveQueue(buildPassiveLiveQueue(options.passiveLiveFeedState), nowMs, passiveLiveScope);
-  const queue = buildUnifiedQueue(cache, savedVariables.parsed.requests || [], passiveLiveQueue);
+  const queue = Array.isArray(options.queueOverride)
+    ? [...options.queueOverride]
+    : buildUnifiedQueue(cache, savedVariables.parsed.requests || [], passiveLiveQueue);
   const liveApplicants = passiveLiveQueue.filter((entry) => entry.source === "applicant");
   const applicants = Array.isArray(options.applicantsOverride)
     ? options.applicantsOverride
@@ -756,15 +774,18 @@ async function createDashboardServer(options = {}) {
     lastEventAtMs: 0,
     pendingEvents: [],
     events: [],
+    seenEventIds: new Map(),
   };
   const passiveQueueRuntime = {
     entries: new Map(),
   };
   const lfgRuntime = {
     entries: new Map(),
+    publishers: new Map(),
     lastSavedVariablesModifiedMs: null,
     passiveSessionKey: null,
     latestLiveEventAtMs: 0,
+    ignoreBeforeMs: 0,
   };
 
   function buildLfgRuntimeKey(entry) {
@@ -776,6 +797,9 @@ async function createDashboardServer(options = {}) {
 
   function resetLfgRuntimeState() {
     lfgRuntime.entries.clear();
+    if (lfgRuntime.publishers && typeof lfgRuntime.publishers.clear === "function") {
+      lfgRuntime.publishers.clear();
+    }
   }
 
   function resetPassiveBrokerCursor(sessionKey = null) {
@@ -1195,6 +1219,578 @@ async function createDashboardServer(options = {}) {
     });
   }
 
+  function pruneSeenBrokerEvents(nowMs = Date.now()) {
+    const maxAgeMs = 6 * 60 * 60 * 1000;
+    const maxEntries = 6000;
+    for (const [eventId, seenAtMs] of passiveBrokerRuntime.seenEventIds.entries()) {
+      if (nowMs - Number(seenAtMs || 0) > maxAgeMs) {
+        passiveBrokerRuntime.seenEventIds.delete(eventId);
+      }
+    }
+
+    const overflow = passiveBrokerRuntime.seenEventIds.size - maxEntries;
+    if (overflow <= 0) {
+      return;
+    }
+
+    const sorted = [...passiveBrokerRuntime.seenEventIds.entries()].sort((left, right) => left[1] - right[1]);
+    for (let index = 0; index < overflow; index += 1) {
+      passiveBrokerRuntime.seenEventIds.delete(sorted[index][0]);
+    }
+  }
+
+  function buildBrokerLogEvent(event) {
+    const eventAt =
+      Number(event && event.capturedAtMs) > 0
+        ? new Date(event.capturedAtMs).toISOString()
+        : event && event.capturedAt
+          ? event.capturedAt
+          : null;
+    return {
+      id: buildAddonEventIdentity(event),
+      key: `event:${buildAddonEventIdentity(event) || buildAddonEventPreview(event)}`,
+      kind: "payload",
+      preview: buildAddonEventPreview(event),
+      payload: event && event.payload ? event.payload : buildAddonEventPreview(event),
+      eventAt,
+      firstSeenAt: eventAt,
+      lastSeenAt: eventAt,
+      seenCount: 1,
+      source: event && event.source ? event.source : null,
+      eventType: event && event.eventType ? event.eventType : null,
+      sessionId: event && event.sessionId ? event.sessionId : null,
+      channelName: event && event.channelName ? event.channelName : null,
+      characterName: event && event.characterName ? event.characterName : null,
+      realm: event && event.realm ? event.realm : null,
+      groupID: event && event.groupID != null ? event.groupID : null,
+    };
+  }
+
+  function normalizeSearchRuntimeEntry(event) {
+    if (!event || event.eventType !== "search" || !event.region || !event.realm || !event.characterName) {
+      return null;
+    }
+
+    const updatedAt =
+      Number(event.capturedAtMs) > 0 ? new Date(event.capturedAtMs).toISOString() : event.capturedAt || null;
+    return {
+      key: buildCacheKey(event.region, event.realm, event.characterName),
+      region: event.region,
+      realm: event.realm,
+      characterName: event.characterName,
+      requestTimestamp: updatedAt,
+      updatedAt,
+      lastSeenAt: Number(event.capturedAtMs) > 0 ? Math.floor(event.capturedAtMs / 1000) : null,
+      seenCount: 1,
+      sources: [event.source || "unknown"],
+      requestOrigins: [event.publisher || "unknown"],
+      channelName: event.channelName || null,
+      sessionId: event.sessionId || null,
+      payload: event.payload || null,
+      eventId: event.eventId || null,
+      sequence: event.sequence || null,
+      assignedRole: event.assignedRole || null,
+      class: event.class || null,
+      groupID: event.groupID != null ? event.groupID : null,
+      memberIndex: event.memberIndex != null ? event.memberIndex : null,
+      itemLevel: event.itemLevel != null ? event.itemLevel : null,
+      level: event.level != null ? event.level : null,
+    };
+  }
+
+  function upsertSearchRuntimeEntry(event) {
+    const candidate = normalizeSearchRuntimeEntry(event);
+    if (!candidate) {
+      return;
+    }
+
+    const existing = passiveQueueRuntime.entries.get(candidate.key);
+    if (!existing) {
+      passiveQueueRuntime.entries.set(candidate.key, candidate);
+      return;
+    }
+
+    const existingMs = Date.parse(existing.updatedAt || "");
+    const candidateMs = Date.parse(candidate.updatedAt || "");
+    const shouldReplace =
+      !Number.isFinite(existingMs) ||
+      (Number.isFinite(candidateMs) && candidateMs > existingMs) ||
+      (candidateMs === existingMs && Number(candidate.sequence || 0) >= Number(existing.sequence || 0));
+
+    const mergedSources = [...new Set([...(existing.sources || []), ...(candidate.sources || [])])];
+    const mergedOrigins = [...new Set([...(existing.requestOrigins || []), ...(candidate.requestOrigins || [])])];
+    passiveQueueRuntime.entries.set(candidate.key, {
+      ...(shouldReplace ? existing : candidate),
+      ...(shouldReplace ? candidate : existing),
+      key: candidate.key,
+      requestTimestamp: shouldReplace ? candidate.requestTimestamp : existing.requestTimestamp,
+      updatedAt: shouldReplace ? candidate.updatedAt : existing.updatedAt,
+      lastSeenAt: Math.max(Number(existing.lastSeenAt || 0), Number(candidate.lastSeenAt || 0)) || null,
+      seenCount: Math.max(Number(existing.seenCount || 0), Number(candidate.seenCount || 0)),
+      sources: mergedSources,
+      requestOrigins: mergedOrigins,
+    });
+  }
+
+  function getResolvedQueueStatus(cache, queueEntry) {
+    const statuses = new Map(
+      listRequestStatuses(cache).map((status) => [
+        status.key || buildCacheKey(status.region, status.realm, status.name || status.characterName),
+        status,
+      ])
+    );
+    return statuses.get(queueEntry.key) || null;
+  }
+
+  function listBrokerQueueEntries(cache) {
+    const queueEntries = [];
+    const requestStatuses = new Map(
+      listRequestStatuses(cache).map((status) => [
+        status.key || buildCacheKey(status.region, status.realm, status.name || status.characterName),
+        status,
+      ])
+    );
+
+    for (const entry of passiveQueueRuntime.entries.values()) {
+      const record = getFreshCachedRecord(cache, {
+        region: entry.region,
+        realm: entry.realm,
+        name: entry.characterName,
+      });
+      if (record) {
+        continue;
+      }
+
+      const status = requestStatuses.get(entry.key) || null;
+      const statusUpdatedAtMs = Date.parse((status && status.updatedAt) || "");
+      const requestUpdatedAtMs = Date.parse(entry.updatedAt || entry.requestTimestamp || "");
+      const isResolved =
+        status &&
+        RESOLVED_QUEUE_STATES.has(status.state) &&
+        Number.isFinite(statusUpdatedAtMs) &&
+        Number.isFinite(requestUpdatedAtMs) &&
+        statusUpdatedAtMs >= requestUpdatedAtMs;
+      if (isResolved) {
+        continue;
+      }
+
+      queueEntries.push({
+        ...entry,
+        record: null,
+        status: status || null,
+      });
+    }
+
+    return queueEntries.sort((left, right) =>
+      String(right.updatedAt || right.requestTimestamp || "").localeCompare(
+        String(left.updatedAt || left.requestTimestamp || ""),
+        "en-US"
+      )
+    );
+  }
+
+  function getLfgPublisherState(publisherKey) {
+    const key = publisherKey || "default";
+    if (!lfgRuntime.publishers.has(key)) {
+      lfgRuntime.publishers.set(key, {
+        activeGroups: new Map(),
+        pendingHeartbeats: new Map(),
+        latestAppliedAtMs: 0,
+        lastHeartbeatAtMs: 0,
+        transport: null,
+      });
+    }
+    return lfgRuntime.publishers.get(key);
+  }
+
+  function rebuildLfgRuntimeEntries() {
+    lfgRuntime.entries.clear();
+    for (const [publisherKey, publisherState] of lfgRuntime.publishers.entries()) {
+      for (const group of publisherState.activeGroups.values()) {
+        for (const member of group.members || []) {
+          const normalized = normalizeLfgRuntimeEntry(
+            {
+              ...member,
+              source: "applicant",
+              requestOrigin: "lfg-status",
+              publisherKey,
+              lastSeenAt: Math.floor(Number(group.capturedAtMs || 0) / 1000),
+              updatedAt: Number(group.capturedAtMs || 0) > 0 ? new Date(group.capturedAtMs).toISOString() : null,
+            },
+            "lfg-status"
+          );
+          if (!normalized) {
+            continue;
+          }
+          lfgRuntime.entries.set(buildLfgRuntimeKey(normalized), normalized);
+        }
+      }
+    }
+  }
+
+  function applyLfgHeartbeatBatch(publisherKey, heartbeatId) {
+    const publisherState = getLfgPublisherState(publisherKey);
+    const batch = publisherState.pendingHeartbeats.get(heartbeatId);
+    if (!batch) {
+      return;
+    }
+
+    const ignoreBeforeMs = Math.max(Number(lfgRuntime.ignoreBeforeMs || 0), Number(publisherState.latestAppliedAtMs || 0));
+    if (Number(batch.capturedAtMs || 0) < ignoreBeforeMs) {
+      publisherState.pendingHeartbeats.delete(heartbeatId);
+      return;
+    }
+
+    publisherState.activeGroups = new Map(batch.groups.entries());
+    publisherState.latestAppliedAtMs = Number(batch.capturedAtMs || 0);
+    publisherState.lastHeartbeatAtMs = Number(batch.capturedAtMs || 0);
+    publisherState.transport = batch.transport || publisherState.transport || null;
+    publisherState.pendingHeartbeats.clear();
+    lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, publisherState.latestAppliedAtMs);
+    rebuildLfgRuntimeEntries();
+  }
+
+  function processLfgStatusEvent(event) {
+    if (!event || event.eventType !== "lfg_status" || Number(event.capturedAtMs || 0) < Number(lfgRuntime.ignoreBeforeMs || 0)) {
+      return;
+    }
+
+    const publisherKey = event.publisherKey || event.channelName || event.publisher || "default";
+    const publisherState = getLfgPublisherState(publisherKey);
+    const eventCapturedAtMs = Number(event.capturedAtMs || 0);
+    if (eventCapturedAtMs < Number(publisherState.latestAppliedAtMs || 0)) {
+      return;
+    }
+
+    publisherState.lastHeartbeatAtMs = Math.max(Number(publisherState.lastHeartbeatAtMs || 0), eventCapturedAtMs);
+    const batchTotal = Number(event.batchTotal || 0);
+    if (batchTotal <= 0) {
+      publisherState.activeGroups.clear();
+      publisherState.pendingHeartbeats.clear();
+      publisherState.latestAppliedAtMs = eventCapturedAtMs;
+      publisherState.transport = event.publisher || publisherState.transport || null;
+      rebuildLfgRuntimeEntries();
+      return;
+    }
+
+    const heartbeatId = event.heartbeatId || event.eventId || `${publisherKey}:${eventCapturedAtMs}`;
+    const batch = publisherState.pendingHeartbeats.get(heartbeatId) || {
+      capturedAtMs: eventCapturedAtMs,
+      totalParts: batchTotal,
+      parts: new Set(),
+      groups: new Map(),
+      transport: event.publisher || null,
+    };
+    batch.capturedAtMs = Math.max(Number(batch.capturedAtMs || 0), eventCapturedAtMs);
+    batch.totalParts = Math.max(Number(batch.totalParts || 0), batchTotal);
+    batch.parts.add(Number(event.batchIndex || 0));
+
+    if (Array.isArray(event.members)) {
+      for (const member of event.members) {
+        if (!member || !member.characterName || !member.realm) {
+          continue;
+        }
+        const groupKey =
+          event.groupID != null
+            ? String(event.groupID)
+            : `solo:${member.characterName}:${member.realm}:${member.memberIndex || 0}`;
+        const group = batch.groups.get(groupKey) || {
+          groupID: event.groupID != null ? event.groupID : null,
+          capturedAtMs: batch.capturedAtMs,
+          members: [],
+        };
+        group.capturedAtMs = batch.capturedAtMs;
+        const memberKey = `${member.characterName}:${member.realm}:${member.memberIndex || 0}`;
+        const withoutExisting = group.members.filter(
+          (existingMember) =>
+            `${existingMember.characterName}:${existingMember.realm}:${existingMember.memberIndex || 0}` !== memberKey
+        );
+        group.members = [
+          ...withoutExisting,
+          {
+            region: event.region || "us",
+            realm: member.realm,
+            characterName: member.characterName,
+            groupID: event.groupID != null ? event.groupID : null,
+            memberIndex: member.memberIndex != null ? member.memberIndex : event.memberIndex || null,
+            class: member.class || event.class || null,
+            assignedRole: member.assignedRole || event.assignedRole || null,
+            itemLevel: event.itemLevel != null ? event.itemLevel : null,
+            level: event.level != null ? event.level : null,
+          },
+        ];
+        batch.groups.set(groupKey, group);
+      }
+    }
+
+    publisherState.pendingHeartbeats.set(heartbeatId, batch);
+    if (batch.parts.size >= batch.totalParts) {
+      applyLfgHeartbeatBatch(publisherKey, heartbeatId);
+    }
+  }
+
+  function isLegacyApplicantSearchEvent(event) {
+    return (
+      event &&
+      event.eventType === "search" &&
+      event.source === "applicant" &&
+      typeof event.payload === "string" &&
+      !event.payload.includes("|e=")
+    );
+  }
+
+  function processLegacyApplicantLfgEvent(event) {
+    if (Number(event && event.capturedAtMs || 0) < Number(lfgRuntime.ignoreBeforeMs || 0)) {
+      return;
+    }
+
+    const normalized = normalizeLfgRuntimeEntry(
+      {
+        ...event,
+        applicantID: event.applicantID != null ? event.applicantID : null,
+        source: "applicant",
+        requestOrigin: "passive-live",
+        lastSeenAt: Number(event.capturedAtMs || 0) > 0 ? Math.floor(event.capturedAtMs / 1000) : null,
+        updatedAt: Number(event.capturedAtMs || 0) > 0 ? new Date(event.capturedAtMs).toISOString() : event.capturedAt,
+      },
+      "passive-live"
+    );
+    if (!normalized) {
+      return;
+    }
+
+    upsertLfgRuntimeEntry(normalized, "passive-live");
+    lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, Number(event.capturedAtMs || 0));
+  }
+
+  function expireStaleLfgState(nowMs = Date.now()) {
+    const heartbeatTtlMs = 3500;
+    let changed = false;
+    for (const publisherState of lfgRuntime.publishers.values()) {
+      if (
+        publisherState.activeGroups.size > 0 &&
+        publisherState.transport === "passive-live" &&
+        Number(publisherState.lastHeartbeatAtMs || 0) > 0 &&
+        nowMs - Number(publisherState.lastHeartbeatAtMs || 0) > heartbeatTtlMs
+      ) {
+        publisherState.activeGroups.clear();
+        publisherState.pendingHeartbeats.clear();
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      rebuildLfgRuntimeEntries();
+    }
+  }
+
+  function parseSavedBatchEvents(savedVariablesSnapshot) {
+    const savedEvents =
+      savedVariablesSnapshot &&
+      savedVariablesSnapshot.parsed &&
+      savedVariablesSnapshot.parsed.eventBatch &&
+      Array.isArray(savedVariablesSnapshot.parsed.eventBatch.events)
+        ? savedVariablesSnapshot.parsed.eventBatch.events
+        : [];
+
+    return savedEvents
+      .map((entry) => {
+        if (!entry || typeof entry.payload !== "string") {
+          return null;
+        }
+        return parseAddonEventPayload(entry.payload, {
+          fallbackTimestampMs: Number(entry.publishedAt || 0) > 0 ? Number(entry.publishedAt) * 1000 : 0,
+          publisher: "savedvariables",
+        });
+      })
+      .filter(Boolean)
+      .sort(compareAddonEvents);
+  }
+
+  function parseLegacySavedRequestEvents(savedVariablesSnapshot) {
+    const savedRequests =
+      savedVariablesSnapshot && savedVariablesSnapshot.parsed && Array.isArray(savedVariablesSnapshot.parsed.requests)
+        ? savedVariablesSnapshot.parsed.requests
+        : [];
+
+    return savedRequests
+      .map((entry) => {
+        if (!entry || !entry.region || !entry.realm || !entry.characterName) {
+          return null;
+        }
+        const capturedAtMs =
+          Number(entry.lastSeenAt || 0) > 0
+            ? Number(entry.lastSeenAt) * 1000
+            : Number(entry.queuedAt || 0) > 0
+              ? Number(entry.queuedAt) * 1000
+              : 0;
+        return {
+          eventType: "search",
+          eventId: `legacy-request:${entry.key || buildCacheKey(entry.region, entry.realm, entry.characterName)}:${
+            capturedAtMs || 0
+          }`,
+          region: entry.region,
+          realm: entry.realm,
+          characterName: entry.characterName,
+          source: entry.source || "savedvariables",
+          publisher: "savedvariables",
+          sequence: null,
+          capturedAtMs,
+          capturedAt: capturedAtMs > 0 ? new Date(capturedAtMs).toISOString() : null,
+          updatedAt: capturedAtMs > 0 ? new Date(capturedAtMs).toISOString() : null,
+          payload: null,
+          channelName: null,
+          sessionId: null,
+          publisherKey: "savedvariables",
+          groupID: entry.groupID != null ? entry.groupID : null,
+          memberIndex: entry.memberIndex != null ? entry.memberIndex : null,
+          assignedRole: entry.assignedRole || null,
+          class: entry.class || null,
+          itemLevel: entry.itemLevel != null ? entry.itemLevel : null,
+          level: entry.level != null ? entry.level : null,
+        };
+      })
+      .filter(Boolean)
+      .sort(compareAddonEvents);
+  }
+
+  function parseManualPublisherEvents(cache) {
+    return listManualRequests(cache)
+      .map((entry) => {
+        if (!entry || !entry.region || !entry.realm || !entry.characterName) {
+          return null;
+        }
+        const capturedAtMs = Date.parse(entry.updatedAt || entry.createdAt || "");
+        return {
+          eventType: "search",
+          eventId:
+            entry.eventId ||
+            `manual:${buildCacheKey(entry.region, entry.realm, entry.characterName)}:${capturedAtMs || 0}`,
+          region: entry.region,
+          realm: entry.realm,
+          characterName: entry.characterName,
+          source: entry.source || "manual",
+          publisher: "manual",
+          sequence: null,
+          capturedAtMs: Number.isFinite(capturedAtMs) ? capturedAtMs : Date.now(),
+          capturedAt:
+            Number.isFinite(capturedAtMs) ? new Date(capturedAtMs).toISOString() : new Date().toISOString(),
+          updatedAt:
+            Number.isFinite(capturedAtMs) ? new Date(capturedAtMs).toISOString() : new Date().toISOString(),
+          payload: null,
+          channelName: null,
+          sessionId: null,
+          publisherKey: "manual",
+        };
+      })
+      .filter(Boolean)
+      .sort(compareAddonEvents);
+  }
+
+  function parsePassiveLiveBrokerEvents(passiveBridge, passiveLiveFeedState) {
+    if (!passiveBridge || passiveBridge.enabled !== true || !passiveLiveFeedState) {
+      return {
+        activeSessionId: passiveBridge && passiveBridge.sessionId ? passiveBridge.sessionId : null,
+        events: [],
+      };
+    }
+
+    const liveEntries = getPassiveLiveSourceEntries(passiveLiveFeedState);
+    const parsedEvents = liveEntries
+      .filter((entry) => entry && entry.kind === "payload" && typeof entry.preview === "string")
+      .map((entry) =>
+        parseAddonEventPayload(entry.preview, {
+          fallbackTimestampMs:
+            Date.parse(entry.eventAt || entry.firstSeenAt || entry.lastSeenAt || "") || Date.now(),
+          publisher: "passive-live",
+        })
+      )
+      .filter(Boolean);
+
+    const channelName = passiveBridge.channelName || null;
+    const channelScopedEvents = channelName
+      ? parsedEvents.filter((event) => event.channelName === channelName)
+      : parsedEvents;
+    const preferredSessionId = passiveBridge.sessionId || null;
+    const preferredSessionEvents = preferredSessionId
+      ? channelScopedEvents.filter((event) => event.sessionId === preferredSessionId)
+      : [];
+    const activeSessionId =
+      preferredSessionEvents.length > 0
+        ? preferredSessionId
+        : channelScopedEvents.length > 0
+          ? [...channelScopedEvents].sort(compareAddonEvents)[channelScopedEvents.length - 1].sessionId || null
+          : preferredSessionId;
+    const sessionScopedEvents = activeSessionId
+      ? channelScopedEvents.filter((event) => event.sessionId === activeSessionId)
+      : channelScopedEvents;
+
+    return {
+      activeSessionId,
+      events: sessionScopedEvents.sort(compareAddonEvents),
+    };
+  }
+
+  function publishBrokerEvents(events) {
+    const delivered = [];
+    for (const event of [...(events || [])].sort(compareAddonEvents)) {
+      const identity = buildAddonEventIdentity(event);
+      if (!identity || passiveBrokerRuntime.seenEventIds.has(identity)) {
+        continue;
+      }
+
+      passiveBrokerRuntime.seenEventIds.set(identity, Number(event.capturedAtMs || Date.now()));
+      passiveBrokerRuntime.events = [...passiveBrokerRuntime.events, buildBrokerLogEvent(event)].slice(
+        -PASSIVE_BROKER_EVENT_LIMIT
+      );
+      if (event.eventType === "search") {
+        upsertSearchRuntimeEntry(event);
+        if (isLegacyApplicantSearchEvent(event)) {
+          processLegacyApplicantLfgEvent(event);
+        }
+      } else if (event.eventType === "lfg_status") {
+        processLfgStatusEvent(event);
+      }
+      delivered.push(event);
+    }
+
+    pruneSeenBrokerEvents();
+    return delivered;
+  }
+
+  function syncBrokerState(cache, savedVariablesSnapshot, passiveBridge, passiveLiveFeedState) {
+    const savedBatchEvents = parseSavedBatchEvents(savedVariablesSnapshot);
+    const legacySavedRequestEvents = parseLegacySavedRequestEvents(savedVariablesSnapshot);
+    const manualEvents = parseManualPublisherEvents(cache);
+    const passiveLiveScope = parsePassiveLiveBrokerEvents(passiveBridge, passiveLiveFeedState);
+    const deliveredEvents = publishBrokerEvents([
+      ...savedBatchEvents,
+      ...legacySavedRequestEvents,
+      ...manualEvents,
+      ...passiveLiveScope.events,
+    ]);
+
+    if (savedBatchEvents.length > 0 && savedVariablesSnapshot && savedVariablesSnapshot.file) {
+      clearLnnrankSavedVariablesEventBatch(savedVariablesSnapshot.file);
+    }
+
+    expireStaleLfgState();
+
+    return {
+      deliveredEvents,
+      queue: listBrokerQueueEntries(cache),
+      applicants: listLfgRuntimeEntries(),
+      passiveLiveFeedState: passiveLiveFeedState
+        ? {
+            ...passiveLiveFeedState,
+            activeSessionId: passiveLiveScope.activeSessionId || null,
+            events: [...passiveBrokerRuntime.events],
+            eventCount: passiveBrokerRuntime.events.length,
+          }
+        : null,
+    };
+  }
+
   function getAutoSyncState() {
     return {
       isRunning: autoSync.isRunning,
@@ -1228,19 +1824,17 @@ async function createDashboardServer(options = {}) {
       typeof passiveLiveFeedStateOverride === "function"
         ? passiveLiveFeedStateOverride()
         : passiveLiveFeedStateOverride || (passiveLiveFeedMonitor ? passiveLiveFeedMonitor.snapshot() : null);
-    const brokerSnapshot = syncPassiveEventBroker(passiveBridge, rawPassiveLiveFeedState);
-    syncLfgRuntimeFromSavedVariables(savedVariables);
-    syncLfgRuntimeFromPassiveBroker(passiveBridge, brokerSnapshot);
+    const brokerSnapshot = syncBrokerState(cache, savedVariables, passiveBridge, rawPassiveLiveFeedState);
 
     return buildDashboardState({
       dbPath,
       accountRoot,
       cacheOverride: cache,
       savedVariablesOverride: savedVariables,
-      applicantsOverride: listLfgRuntimeEntries(),
+      queueOverride: brokerSnapshot.queue,
+      applicantsOverride: brokerSnapshot.applicants,
       autoSyncState: getAutoSyncState(),
       passiveLiveFeedState: brokerSnapshot.passiveLiveFeedState,
-      passiveLiveQueueOverride: brokerSnapshot.passiveLiveQueue,
     });
   }
 
@@ -1369,11 +1963,15 @@ async function createDashboardServer(options = {}) {
         }
 
         const cache = loadCache(dbPath);
+        const updatedAt = formatIsoTimestamp();
+        const manualEventId = `manual:${buildCacheKey(body.region || "us", body.realm, body.name)}:${Date.now()}`;
         const entry = upsertManualRequest(cache, {
           region: body.region || "us",
           realm: body.realm,
           characterName: body.name,
           source: "manual",
+          updatedAt,
+          eventId: manualEventId,
         });
         upsertRequestStatus(cache, {
           region: entry.region,
@@ -1382,7 +1980,7 @@ async function createDashboardServer(options = {}) {
           state: "queued",
           message: "Queued from the dashboard.",
           source: entry.source || "manual",
-          updatedAt: entry.updatedAt,
+          updatedAt,
         });
         saveCache(cache, dbPath);
         scheduleAutoSync(100);
@@ -1488,10 +2086,8 @@ async function createDashboardServer(options = {}) {
         }
 
         resetLfgRuntimeState();
-        passiveBrokerRuntime.lastEventAtMs = Date.now();
-        passiveBrokerRuntime.lastEventSequence = Number.MAX_SAFE_INTEGER;
-        passiveBrokerRuntime.pendingEvents = [];
-        lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, passiveBrokerRuntime.lastEventAtMs);
+        lfgRuntime.ignoreBeforeMs = Date.now();
+        lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, lfgRuntime.ignoreBeforeMs);
 
         jsonResponse(response, 200, {
           ok: true,

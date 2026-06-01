@@ -146,11 +146,58 @@ local function ensureSettingsPanel()
         end
     )
 
+    local savedEventBatch = createCheckbox(
+        panel,
+        "Write reload event batch",
+        "Store outbound lookup events in SavedVariables so the app can import them after /reload.",
+        scanApplicants,
+        -10,
+        function()
+            local db = getDb()
+            return db and db.settings and db.settings.savedEventBatchEnabled
+        end,
+        function(value)
+            local db = getDb()
+            if not db or not db.settings then
+                return
+            end
+            db.settings.savedEventBatchEnabled = value
+            notifySettingsChanged()
+        end
+    )
+
+    local passiveChannel = createCheckbox(
+        panel,
+        "Write live private channel events",
+        "Publish outbound lookup events into the hidden self-channel for live app pickup.",
+        savedEventBatch,
+        -10,
+        function()
+            local db = getDb()
+            return db and db.settings and db.settings.passiveChannelEnabled
+        end,
+        function(value)
+            if type(addon.SetPassiveChannelEnabled) == "function" then
+                addon.SetPassiveChannelEnabled(value)
+            else
+                local db = getDb()
+                if not db or not db.settings then
+                    return
+                end
+                db.settings.passiveChannelEnabled = value
+            end
+            scheduleCollectors()
+            notifySettingsChanged()
+        end
+    )
+
     panel.refresh = function()
         showSearching:Refresh()
         showInCombat:Refresh()
         scanGroupMembers:Refresh()
         scanApplicants:Refresh()
+        savedEventBatch:Refresh()
+        passiveChannel:Refresh()
     end
 
     if Settings and type(Settings.RegisterCanvasLayoutCategory) == "function" and

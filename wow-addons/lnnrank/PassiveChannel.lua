@@ -227,7 +227,7 @@ local function setPassiveWritePending(isPending)
     end
 end
 
-local function appendPassiveMessageLogEntry(request, payload)
+local function appendPassiveMessageLogEntry(metadata, payload)
     local messageLog = getPassiveMessageLog()
     local sequence = publishSequence
     local entryKey = tostring(sequence)
@@ -236,10 +236,12 @@ local function appendPassiveMessageLogEntry(request, payload)
         sequence = sequence,
         publishedAt = getNowUnix(),
         payload = payload,
-        region = request.region,
-        realm = request.realm,
-        characterName = request.characterName,
-        source = request.source,
+        eventType = metadata and metadata.eventType or nil,
+        eventId = metadata and metadata.eventId or nil,
+        region = metadata and metadata.region or nil,
+        realm = metadata and metadata.realm or nil,
+        characterName = metadata and metadata.characterName or nil,
+        source = metadata and metadata.source or nil,
     }
 
     local keys = {}
@@ -336,6 +338,18 @@ function addon.IsPassiveChannelEnabled()
     return addon.GetDb().settings.passiveChannelEnabled == true
 end
 
+function addon.GetPassivePlayerKey()
+    return buildPassivePlayerKey()
+end
+
+function addon.GetPassiveSessionId()
+    return ensurePassiveSessionId()
+end
+
+function addon.GetPassiveChannelName()
+    return passiveChannelName or buildPassiveChannelName()
+end
+
 function addon.SetPassiveChannelEnabled(enabled)
     addon.GetDb().settings.passiveChannelEnabled = enabled == true
     if enabled == true then
@@ -371,8 +385,8 @@ function addon.GetPassiveChannelDebugState()
     }
 end
 
-function addon.TryPublishRequestToPassiveChannel(request)
-    if not addon.IsPassiveChannelEnabled() or type(request) ~= "table" then
+function addon.PublishPassivePayload(payload, metadata)
+    if not addon.IsPassiveChannelEnabled() or type(payload) ~= "string" or payload == "" then
         return false
     end
 
@@ -382,12 +396,17 @@ function addon.TryPublishRequestToPassiveChannel(request)
         return false
     end
 
-    local payload = buildPayload(request)
+    if metadata and type(metadata.sequence) == "number" then
+        publishSequence = metadata.sequence
+    else
+        publishSequence = publishSequence + 1
+    end
+
     local ok = pcall(SendChatMessage, payload, "CHANNEL", nil, channelNumber)
     if ok then
         lastPublishedAt = getNowUnix()
         lastPublishedPayload = payload
-        appendPassiveMessageLogEntry(request, payload)
+        appendPassiveMessageLogEntry(metadata, payload)
         hideChannelEverywhere(passiveChannelName)
         setPassiveWritePending(false)
     else
@@ -396,6 +415,20 @@ function addon.TryPublishRequestToPassiveChannel(request)
     syncPassiveBridgeState()
 
     return ok
+end
+
+function addon.TryPublishRequestToPassiveChannel(request)
+    if not addon.IsPassiveChannelEnabled() or type(request) ~= "table" then
+        return false
+    end
+
+    local payload = buildPayload(request)
+    local metadata = {}
+    for key, value in pairs(request) do
+        metadata[key] = value
+    end
+    metadata.sequence = publishSequence
+    return addon.PublishPassivePayload(payload, metadata)
 end
 
 local passiveFrame = CreateFrame("Frame")

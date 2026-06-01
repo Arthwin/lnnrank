@@ -930,24 +930,25 @@ function parsePassivePayloadEnvelope(payload) {
 
     const key = segment.slice(0, separatorIndex);
     const value = segment.slice(separatorIndex + 1);
-    if (!key || value === "") {
+    if (!key) {
       continue;
     }
     fields[key] = value;
   }
 
-  if (!fields.ch || !fields.n || !fields.rg || !fields.re || !fields.nm || !fields.sr) {
+  if (!fields.ch || !fields.n || !fields.rg || !fields.sr) {
     return null;
   }
 
   const timestampMs = Number.parseInt(fields.t || "", 10);
   return {
+    eventType: fields.e || "search",
     channelName: fields.ch,
     sessionId: fields.ss || "",
     sequence: Number.parseInt(fields.n, 10) || 0,
     region: fields.rg,
-    realm: fields.re,
-    characterName: fields.nm,
+    realm: fields.re || null,
+    characterName: fields.nm || null,
     source: fields.sr,
     timestampMs: Number.isFinite(timestampMs) && timestampMs > 0 ? timestampMs : null,
   };
@@ -1034,19 +1035,8 @@ function resolveVisiblePassiveSession(passive, liveFeed) {
     });
   }
 
-  const appclearCandidate = candidates.filter((entry) => entry.source === "appclear").sort(comparePassiveLogRecency)[0];
-  if (appclearCandidate) {
-    return appclearCandidate.sessionId;
-  }
-
-  const applicantCandidate = candidates
-    .filter((entry) => entry.source === "applicant")
-    .sort(comparePassiveLogRecency)[0];
-  if (applicantCandidate) {
-    return applicantCandidate.sessionId;
-  }
-
-  return passive && passive.sessionId ? passive.sessionId : null;
+  const latestCandidate = candidates.sort(comparePassiveLogRecency)[0];
+  return (latestCandidate && latestCandidate.sessionId) || (passive && passive.sessionId ? passive.sessionId : null);
 }
 
 function buildPassiveLogEntries(passive, liveFeed) {
@@ -1085,9 +1075,6 @@ function buildPassiveLogEntries(passive, liveFeed) {
     if (!parsed) {
       continue;
     }
-    if (parsed.source === "appclear") {
-      continue;
-    }
     if (activeChannelName && parsed.channelName && parsed.channelName !== activeChannelName) {
       continue;
     }
@@ -1098,8 +1085,13 @@ function buildPassiveLogEntries(passive, liveFeed) {
     upsertEntry(`payload:${entry.preview}`, {
       id: `payload:${entry.preview}`,
       sortAt: resolvePassivePayloadSortAt(entry, parsed),
-      title: [parsed.characterName, parsed.realm].filter(Boolean).join("-") || "Unknown character",
-      source: formatSourceLabel(parsed.source),
+      title:
+        [parsed.characterName, parsed.realm].filter(Boolean).join("-") ||
+        (parsed.eventType === "lfg_status" ? "LFG heartbeat" : "Unknown event"),
+      source:
+        parsed.eventType === "lfg_status"
+          ? "LFG heartbeat"
+          : formatSourceLabel(parsed.source),
       sequence: parsed.sequence,
       payload: entry.preview,
       transport: "Live",
@@ -1112,9 +1104,6 @@ function buildPassiveLogEntries(passive, liveFeed) {
     }
 
     const parsed = parsePassivePayloadEnvelope(entry.payload);
-    if (parsed && parsed.source === "appclear") {
-      continue;
-    }
     if (parsed && activeChannelName && parsed.channelName && parsed.channelName !== activeChannelName) {
       continue;
     }
@@ -1127,8 +1116,13 @@ function buildPassiveLogEntries(passive, liveFeed) {
       title:
         parsed && parsed.characterName && parsed.realm
           ? `${parsed.characterName}-${parsed.realm}`
-          : [entry.characterName, entry.realm].filter(Boolean).join("-") || "Unknown character",
-      source: formatSourceLabel((parsed && parsed.source) || entry.source || "wow"),
+          : parsed && parsed.eventType === "lfg_status"
+            ? "LFG heartbeat"
+            : [entry.characterName, entry.realm].filter(Boolean).join("-") || "Unknown event",
+      source:
+        parsed && parsed.eventType === "lfg_status"
+          ? "LFG heartbeat"
+          : formatSourceLabel((parsed && parsed.source) || entry.source || "wow"),
       sequence: (parsed && parsed.sequence) || entry.sequence || 0,
       payload: entry.payload,
       transport: "Saved",
@@ -1161,7 +1155,10 @@ function renderPassive(data) {
 
   const passive = data.passiveBridge;
   const liveFeed = data.passiveLiveFeed;
-  if (!passive) {
+  const hasLiveFeedEvents =
+    Boolean(liveFeed && Array.isArray(liveFeed.events) && liveFeed.events.length > 0) ||
+    Boolean(liveFeed && Array.isArray(liveFeed.entries) && liveFeed.entries.length > 0);
+  if (!passive && !hasLiveFeedEvents) {
     target.innerHTML = `
       <section class="card">
         <div class="card-head">
@@ -1173,10 +1170,11 @@ function renderPassive(data) {
     return;
   }
 
-  const playerLabel = [passive.playerName, passive.realm].filter(Boolean).join("-") || "Unknown";
-  const regionLabel = passive.region ? String(passive.region).toUpperCase() : "Unknown";
+  const passiveState = passive || {};
+  const playerLabel = [passiveState.playerName, passiveState.realm].filter(Boolean).join("-") || "Unknown";
+  const regionLabel = passiveState.region ? String(passiveState.region).toUpperCase() : "Unknown";
   const liveStatus = formatPassiveLiveStatus(liveFeed);
-  const allLogEntries = buildPassiveLogEntries(passive, liveFeed);
+  const allLogEntries = buildPassiveLogEntries(passiveState, liveFeed);
   const hiddenIds = getHiddenLiveLogIds();
   const logEntries = allLogEntries.filter((entry) => !hiddenIds.has(entry.id));
   const pagedLogEntries = paginateItems(logEntries, state.liveLogPage, LIVE_LOG_PAGE_SIZE);
@@ -1184,8 +1182,8 @@ function renderPassive(data) {
   persistViewState();
   const statsMarkup = [
     createPassiveStatChip("Live", liveStatus),
-    createPassiveStatChip("Channel", passive.channelName || "Unknown", { code: true }),
-    createPassiveStatChip("Seq", formatCompactNumber(passive.sequence ?? 0, 0)),
+    createPassiveStatChip("Channel", passiveState.channelName || "Unknown", { code: true }),
+    createPassiveStatChip("Seq", formatCompactNumber(passiveState.sequence ?? 0, 0)),
     createPassiveStatChip(
       "WoW PID",
       liveFeed && liveFeed.wowProcessId != null ? String(liveFeed.wowProcessId) : "Unknown",

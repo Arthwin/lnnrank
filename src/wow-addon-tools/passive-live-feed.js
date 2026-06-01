@@ -3,6 +3,11 @@
 const { execFile } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const {
+  extractCanonicalPayload,
+  extractPayloadTimestampMs,
+  parseAddonEventPayload,
+} = require("./addon-event-format");
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const HELPER_PROJECT_PATH = path.join(__dirname, "passive-live-scanner", "PassiveLiveScanner.csproj");
@@ -168,31 +173,6 @@ function normalizeScanResult(result) {
   };
 }
 
-function extractCanonicalPayload(text) {
-  const match = String(text || "").match(
-    /LNNRANK\|ch=[A-Za-z0-9_:=.]{1,30}\|ss=[A-Za-z0-9_:=.]{0,20}\|n=\d{1,10}\|rg=[A-Za-z0-9_:=.]{1,8}\|re=[A-Za-z0-9_:=.]{1,32}\|nm=[A-Za-z0-9_:=.]{1,32}\|sr=[A-Za-z0-9_]{1,16}(?:\|ai=\d{1,10})?(?:\|gi=\d{1,10})?(?:\|mi=\d{1,3})?(?:\|ar=[A-Za-z0-9_:=.]{1,16})?(?:\|cl=[A-Za-z0-9_:=.]{1,16})?(?:\|il=\d{1,4}(?:\.\d{1,2})?)?(?:\|lv=\d{1,3})?(?:\|t=\d{10,13})?/u
-  );
-  if (!match) {
-    return null;
-  }
-  return match[0];
-}
-
-function extractPayloadTimestampMs(payload) {
-  const match = String(payload || "").match(/\|t=(\d{10,13})(?:\||$)/u);
-  if (!match) {
-    return null;
-  }
-
-  const rawValue = match[1];
-  const numericValue = Number.parseInt(rawValue, 10);
-  if (!Number.isFinite(numericValue) || numericValue <= 0) {
-    return null;
-  }
-
-  return rawValue.length <= 10 ? numericValue * 1000 : numericValue;
-}
-
 function extractPassiveLiveFeedEntries(scanResult) {
   const matches = Array.isArray(scanResult && scanResult.matches) ? scanResult.matches : [];
   const entries = [];
@@ -289,23 +269,28 @@ function parsePassiveCandidateMetadata(preview) {
   if (!payload) {
     return {
       payload: null,
+      eventType: null,
       source: null,
       sequence: 0,
       timestampMs: 0,
     };
   }
 
-  const sourceMatch = payload.match(/\|sr=([^|]+)(?:\||$)/u);
-  const sequenceMatch = payload.match(/\|n=(\d+)(?:\||$)/u);
+  const parsed = parseAddonEventPayload(payload) || null;
   return {
     payload,
-    source: sourceMatch ? sourceMatch[1] : null,
-    sequence: sequenceMatch ? Number.parseInt(sequenceMatch[1], 10) || 0 : 0,
-    timestampMs: extractPayloadTimestampMs(payload) || 0,
+    eventType: parsed ? parsed.eventType : null,
+    source: parsed ? parsed.source : null,
+    sequence: parsed ? Number(parsed.sequence || 0) : 0,
+    timestampMs: parsed ? Number(parsed.capturedAtMs || 0) : extractPayloadTimestampMs(payload) || 0,
   };
 }
 
-function getPassiveCandidateSourceWeight(source) {
+function getPassiveCandidateSourceWeight(eventType, source) {
+  if (String(eventType || "").toLowerCase() === "lfg_status") {
+    return 3;
+  }
+
   switch (String(source || "").toLowerCase()) {
     case "unit":
     case "world":
@@ -345,7 +330,7 @@ function selectPassiveAddressCandidates(scanResult) {
         address: match.address,
         numericAddress: Number.parseInt(String(match.address || "").replace(/^0x/iu, ""), 16),
         priority,
-        sourceWeight: getPassiveCandidateSourceWeight(metadata.source),
+        sourceWeight: getPassiveCandidateSourceWeight(metadata.eventType, metadata.source),
         timestampMs: metadata.timestampMs,
         sequence: metadata.sequence,
       };

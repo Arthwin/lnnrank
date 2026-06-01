@@ -29,6 +29,7 @@ function createEmptyParsedSavedVariables() {
     requests: [],
     groupMembers: [],
     applicants: [],
+    eventBatch: null,
     passiveBridge: null,
     lastImportedBuild: null,
   };
@@ -41,6 +42,10 @@ function renderEmptySavedVariablesFile() {
     '  ["requests"] = {},',
     '  ["groupMembers"] = {},',
     '  ["applicants"] = {},',
+    '  ["eventBridge"] = {',
+    '    ["sequence"] = 0,',
+    '    ["events"] = {},',
+    "  },",
     '  ["passiveBridge"] = {},',
     "}",
     "",
@@ -381,6 +386,40 @@ function parsePassiveBridge(block) {
   return hasScalarFields || passiveBridge.messageLog.length > 0 ? passiveBridge : null;
 }
 
+function parseEventBatch(block) {
+  if (block == null) {
+    return null;
+  }
+
+  const eventsBlock = extractTableBlock(block, "events");
+  const eventBatch = {
+    sequence: extractScalarField(block, "sequence"),
+    updatedAt: extractScalarField(block, "updatedAt"),
+    events:
+      eventsBlock == null
+        ? []
+        : parseKeyedTableEntries(eventsBlock, [
+            "sequence",
+            "publishedAt",
+            "eventType",
+            "eventId",
+            "payload",
+            "source",
+            "region",
+            "realm",
+            "characterName",
+            "heartbeatId",
+            "batchIndex",
+            "batchTotal",
+            "groupID",
+            "memberIndex",
+          ]).sort((left, right) => Number(left.sequence || 0) - Number(right.sequence || 0)),
+  };
+
+  const hasScalarFields = Object.entries(eventBatch).some(([key, value]) => key !== "events" && value != null);
+  return hasScalarFields || eventBatch.events.length > 0 ? eventBatch : null;
+}
+
 function parseLnnrankSavedVariables(text) {
   const rootBlock = extractTableBlock(text, "lnnrankDB");
   if (rootBlock == null) {
@@ -391,6 +430,7 @@ function parseLnnrankSavedVariables(text) {
   const settingsBlock = extractTableBlock(rootBlock, "settings");
   const groupMembersBlock = extractTableBlock(rootBlock, "groupMembers");
   const applicantsBlock = extractTableBlock(rootBlock, "applicants");
+  const eventBatchBlock = extractTableBlock(rootBlock, "eventBridge");
   const passiveBridgeBlock = extractTableBlock(rootBlock, "passiveBridge");
 
   return {
@@ -399,11 +439,14 @@ function parseLnnrankSavedVariables(text) {
       showInCombat: settingsBlock == null ? null : extractScalarField(settingsBlock, "showInCombat"),
       scanGroupMembers: settingsBlock == null ? null : extractScalarField(settingsBlock, "scanGroupMembers"),
       scanApplicants: settingsBlock == null ? null : extractScalarField(settingsBlock, "scanApplicants"),
+      savedEventBatchEnabled:
+        settingsBlock == null ? null : extractScalarField(settingsBlock, "savedEventBatchEnabled"),
       passiveChannelEnabled: settingsBlock == null ? null : extractScalarField(settingsBlock, "passiveChannelEnabled"),
     },
     requests: requestsBlock == null ? [] : parseRequestEntries(requestsBlock),
     groupMembers: groupMembersBlock == null ? [] : parseSnapshotEntries(groupMembersBlock),
     applicants: applicantsBlock == null ? [] : parseSnapshotEntries(applicantsBlock),
+    eventBatch: parseEventBatch(eventBatchBlock),
     passiveBridge: parsePassiveBridge(passiveBridgeBlock),
     lastImportedBuild: extractScalarField(rootBlock, "lastImportedBuild"),
   };
@@ -507,6 +550,29 @@ function clearLnnrankSavedVariablesApplicantsText(text) {
   return replaceApplicantsTableText(text, []);
 }
 
+function replaceEventBatchEventsTableText(text, entries) {
+  const eventBridgeRange = findTableBlockRange(text, "eventBridge");
+  if (!eventBridgeRange) {
+    return text;
+  }
+
+  const rootBlock = text.slice(eventBridgeRange.bodyStart + 1, eventBridgeRange.bodyEnd);
+  const eventsRange = findTableBlockRange(rootBlock, "events");
+  if (!eventsRange) {
+    return text;
+  }
+
+  const absoluteBodyStart = eventBridgeRange.bodyStart + 1 + eventsRange.bodyStart;
+  const absoluteBodyEnd = eventBridgeRange.bodyStart + 1 + eventsRange.bodyEnd;
+  const before = text.slice(0, absoluteBodyStart + 1);
+  const after = text.slice(absoluteBodyEnd);
+  return `${before}${renderRequestsTableBody(entries)}${after}`;
+}
+
+function clearLnnrankSavedVariablesEventBatchText(text) {
+  return replaceEventBatchEventsTableText(text, []);
+}
+
 function clearLnnrankSavedVariablesQueue(filePath) {
   const source = fs.readFileSync(filePath, "utf8");
   const parsed = parseLnnrankSavedVariables(source);
@@ -560,9 +626,29 @@ function clearLnnrankSavedVariablesApplicants(filePath) {
   };
 }
 
+function clearLnnrankSavedVariablesEventBatch(filePath) {
+  const source = fs.readFileSync(filePath, "utf8");
+  const parsed = parseLnnrankSavedVariables(source);
+  const clearedText = clearLnnrankSavedVariablesEventBatchText(source);
+  const removed = parsed.eventBatch && Array.isArray(parsed.eventBatch.events) ? parsed.eventBatch.events.length : 0;
+  const changed = clearedText !== source;
+
+  if (changed) {
+    fs.writeFileSync(filePath, clearedText, "utf8");
+  }
+
+  return {
+    filePath,
+    cleared: changed,
+    removed,
+  };
+}
+
 module.exports = {
   clearLnnrankSavedVariablesApplicants,
   clearLnnrankSavedVariablesApplicantsText,
+  clearLnnrankSavedVariablesEventBatch,
+  clearLnnrankSavedVariablesEventBatchText,
   clearLnnrankSavedVariablesQueue,
   clearLnnrankSavedVariablesRequestsText,
   createEmptyParsedSavedVariables,

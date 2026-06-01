@@ -96,6 +96,10 @@ local function queueCharacter(region, realm, characterName, source, extra)
         return false
     end
 
+    if type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance() then
+        return false
+    end
+
     local requestKey = addon.BuildRequestKey(region, realm, characterName)
     if shouldSuppressDuplicate(requestKey) then
         return false
@@ -111,8 +115,8 @@ local function queueCharacter(region, realm, characterName, source, extra)
         end
     end
 
-    if type(addon.TryPublishRequestToPassiveChannel) == "function" then
-        addon.TryPublishRequestToPassiveChannel(request)
+    if type(addon.PublishSearchEvent) == "function" then
+        addon.PublishSearchEvent(request)
     end
 
     addon.Print(string.format("Queued a lookup for %s-%s.", characterName, realm))

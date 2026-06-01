@@ -44,6 +44,10 @@ local function getUnitNameRealm(unitToken)
 end
 
 local function queueLookup(region, realm, characterName, source, extra)
+    if type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance() then
+        return nil
+    end
+
     local request = addon.QueueRequest(region, realm, characterName)
     request.source = source
 
@@ -196,8 +200,8 @@ local function onApplicantMemberMouseUp(self, button)
     end
     local request = queueLookupPayload(lookup, "applicant")
     if request then
-        if type(addon.TryPublishRequestToPassiveChannel) == "function" then
-            addon.TryPublishRequestToPassiveChannel(request)
+        if type(addon.PublishSearchEvent) == "function" then
+            addon.PublishSearchEvent(request)
         end
         addon.Print(string.format("Queued applicant lookup for %s-%s.", lookup.characterName, lookup.realm))
     end
@@ -215,8 +219,8 @@ local function onApplicantRowMouseUp(self, button)
         end
         local request = queueLookupPayload(lookup, "applicant")
         if request then
-            if type(addon.TryPublishRequestToPassiveChannel) == "function" then
-                addon.TryPublishRequestToPassiveChannel(request)
+            if type(addon.PublishSearchEvent) == "function" then
+                addon.PublishSearchEvent(request)
             end
             queued = queued + 1
         end
@@ -407,7 +411,8 @@ local function collectGroupMembers()
     local region = addon.GetCurrentRegionSlug()
     local entries = {}
 
-    if not addon.ShouldScanGroupMembers() then
+    if (type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance()) or
+        not addon.ShouldScanGroupMembers() then
         addon.ReplaceSnapshotBucket("groupMembers", entries)
         return
     end
@@ -458,27 +463,13 @@ local function ensurePlayerQueuedForRefresh()
         return
     end
 
-    queueLookup(region, playerRealm, playerName, "self", {
+    local request = queueLookup(region, playerRealm, playerName, "self", {
         unitToken = "player",
         queuedBecause = "daily-self-refresh",
     })
-end
-
-local function publishApplicantClearEvent(region)
-    if type(addon.TryPublishRequestToPassiveChannel) ~= "function" or
-        type(addon.IsPassiveChannelEnabled) ~= "function" or
-        not addon.IsPassiveChannelEnabled() then
-        return false
+    if request and type(addon.PublishSearchEvent) == "function" then
+        addon.PublishSearchEvent(request)
     end
-
-    local playerName = type(UnitName) == "function" and UnitName("player") or "player"
-    local playerRealm = type(GetRealmName) == "function" and GetRealmName() or "realm"
-    return addon.TryPublishRequestToPassiveChannel({
-        region = region,
-        realm = playerRealm,
-        characterName = playerName,
-        source = "appclear",
-    })
 end
 
 local function collectApplicants()
@@ -486,16 +477,20 @@ local function collectApplicants()
     local entries = {}
     local applicantGroups = {}
     local applicantGroupsById = {}
+    local heartbeatMembers = {}
 
-    if not addon.ShouldScanApplicants() or type(C_LFGList) ~= "table" or type(C_LFGList.GetApplicants) ~= "function" then
-        publishApplicantClearEvent(region)
+    if (type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance()) or
+        not addon.ShouldScanApplicants() or type(C_LFGList) ~= "table" or type(C_LFGList.GetApplicants) ~= "function" then
+        if type(addon.PublishLfgStatusSnapshot) == "function" and
+            not (type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance()) then
+            addon.PublishLfgStatusSnapshot(region, heartbeatMembers)
+        end
         addon.PruneQueuedRequestsBySource("applicant", entries)
         addon.ReplaceSnapshotBucket("applicants", entries)
         refreshApplicantFrameBindings(applicantGroups, applicantGroupsById)
         return
     end
 
-    publishApplicantClearEvent(region)
     local applicants = C_LFGList.GetApplicants() or {}
     for index = 1, #applicants do
         local applicantInfo = C_LFGList.GetApplicantInfo(applicants[index])
@@ -546,19 +541,22 @@ local function collectApplicants()
                     }
                     applicantGroups[index][memberIndex] = applicantLookup
                     applicantGroupsById[applicantInfo.applicantID][memberIndex] = applicantLookup
-
-                    if type(addon.TryPublishRequestToPassiveChannel) == "function" then
-                        addon.TryPublishRequestToPassiveChannel(applicantLookup)
-                    end
+                    table.insert(heartbeatMembers, applicantLookup)
 
                     if addon.ShouldAutoQueueLookup(region, realm, name) then
-                        queueLookup(region, realm, name, "applicant", applicantLookup)
+                        local request = queueLookup(region, realm, name, "applicant", applicantLookup)
+                        if request and type(addon.PublishSearchEvent) == "function" then
+                            addon.PublishSearchEvent(request)
+                        end
                     end
                 end
             end
         end
     end
 
+    if type(addon.PublishLfgStatusSnapshot) == "function" then
+        addon.PublishLfgStatusSnapshot(region, heartbeatMembers)
+    end
     addon.PruneQueuedRequestsBySource("applicant", entries)
     addon.ReplaceSnapshotBucket("applicants", entries)
     refreshApplicantFrameBindings(applicantGroups, applicantGroupsById)
@@ -583,8 +581,9 @@ end
 
 local function shouldRunApplicantHeartbeat()
     return addon.ShouldScanApplicants() and
+        not (type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance()) and
         type(addon.IsPassiveChannelEnabled) == "function" and
-        addon.IsPassiveChannelEnabled()
+        (addon.IsPassiveChannelEnabled() or (type(addon.IsSavedEventBatchEnabled) == "function" and addon.IsSavedEventBatchEnabled()))
 end
 
 scanFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
