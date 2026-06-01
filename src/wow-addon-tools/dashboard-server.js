@@ -1566,7 +1566,7 @@ async function createDashboardServer(options = {}) {
   }
 
   function expireStaleLfgState(nowMs = Date.now()) {
-    const heartbeatTtlMs = 3500;
+    const heartbeatTtlMs = 10000;
     let changed = false;
     for (const publisherState of lfgRuntime.publishers.values()) {
       if (
