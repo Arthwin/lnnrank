@@ -1560,6 +1560,95 @@ test("dashboard server orders same-timestamp passive events by sequence", async 
   }
 });
 
+test("dashboard broker does not redeliver identical passive events across snapshots", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-broker-dedupe-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const eventTimestampMs = Date.now();
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44635",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    events: [
+      {
+        key: "event-applicant-1",
+        kind: "payload",
+        preview: `LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf44635|n=300|rg=us|re=Stormrage|nm=Firstone|sr=applicant|ai=51|gi=51|mi=1|ar=DAMAGER|cl=ROGUE|il=281.0|lv=90|t=${eventTimestampMs}`,
+        eventAt: new Date(eventTimestampMs).toISOString(),
+      },
+    ],
+  };
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+    testHooks,
+  });
+
+  try {
+    const firstSnapshot = testHooks.snapshotState();
+    const secondSnapshot = testHooks.snapshotState();
+
+    assert.equal(firstSnapshot.applicants.length, 1);
+    assert.equal(secondSnapshot.applicants.length, 1);
+    assert.equal(firstSnapshot.queue.length, 1);
+    assert.equal(secondSnapshot.queue.length, 1);
+    assert.equal(firstSnapshot.passiveLiveFeed.events.length, 1);
+    assert.equal(secondSnapshot.passiveLiveFeed.events.length, 1);
+    assert.equal(secondSnapshot.passiveLiveFeed.events[0].preview, firstSnapshot.passiveLiveFeed.events[0].preview);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
 test("dashboard auto sync recovers after an earlier queue-empty skip", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-"));
   const accountRoot = path.join(tempDir, "Account");

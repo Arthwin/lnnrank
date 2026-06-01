@@ -100,6 +100,7 @@ const RESOLVED_QUEUE_STATES = new Set([
 const LIVE_APPLICANT_TTL_SECONDS = 5;
 const PASSIVE_EVENT_BATCH_MAX_AGE_MS = 1000;
 const PASSIVE_EVENT_BATCH_MAX_SIZE = 5;
+const PASSIVE_BROKER_EVENT_LIMIT = 400;
 
 function toIsoFromUnix(value) {
   return typeof value === "number" ? new Date(value * 1000).toISOString() : null;
@@ -598,11 +599,9 @@ function buildDashboardState(options = {}) {
   const savedVariables = options.savedVariablesOverride || loadSavedVariablesSnapshot(accountRoot);
   const passiveBridge = normalizePassiveBridge(savedVariables.parsed.passiveBridge);
   const passiveLiveScope = buildPassiveLiveScope(passiveBridge, options.passiveLiveFeedState);
-  const passiveLiveQueue = filterActivePassiveLiveQueue(
-    buildPassiveLiveQueue(options.passiveLiveFeedState),
-    nowMs,
-    passiveLiveScope
-  );
+  const passiveLiveQueue = Array.isArray(options.passiveLiveQueueOverride)
+    ? [...options.passiveLiveQueueOverride]
+    : filterActivePassiveLiveQueue(buildPassiveLiveQueue(options.passiveLiveFeedState), nowMs, passiveLiveScope);
   const queue = buildUnifiedQueue(cache, savedVariables.parsed.requests || [], passiveLiveQueue);
   const liveApplicants = passiveLiveQueue.filter((entry) => entry.source === "applicant");
   const applicants = Array.isArray(options.applicantsOverride)
@@ -751,13 +750,19 @@ async function createDashboardServer(options = {}) {
     Number.parseInt(String(options.passiveEventBatchMaxSize ?? PASSIVE_EVENT_BATCH_MAX_SIZE), 10) ||
       PASSIVE_EVENT_BATCH_MAX_SIZE
   );
+  const passiveBrokerRuntime = {
+    sessionKey: null,
+    lastEventSequence: 0,
+    lastEventAtMs: 0,
+    pendingEvents: [],
+    events: [],
+  };
+  const passiveQueueRuntime = {
+    entries: new Map(),
+  };
   const lfgRuntime = {
     entries: new Map(),
     lastSavedVariablesModifiedMs: null,
-    lastPassiveSequence: 0,
-    lastPassiveEventSequence: 0,
-    lastPassiveEventAtMs: 0,
-    pendingPassiveEvents: [],
     passiveSessionKey: null,
     latestLiveEventAtMs: 0,
   };
@@ -771,7 +776,104 @@ async function createDashboardServer(options = {}) {
 
   function resetLfgRuntimeState() {
     lfgRuntime.entries.clear();
-    lfgRuntime.pendingPassiveEvents = [];
+  }
+
+  function resetPassiveBrokerCursor(sessionKey = null) {
+    passiveBrokerRuntime.sessionKey = sessionKey;
+    passiveBrokerRuntime.lastEventSequence = 0;
+    passiveBrokerRuntime.lastEventAtMs = 0;
+    passiveBrokerRuntime.pendingEvents = [];
+  }
+
+  function buildPassiveLogEvent(entry) {
+    const eventAt =
+      entry && entry.eventAtMs > 0
+        ? new Date(entry.eventAtMs).toISOString()
+        : entry && entry.eventAt
+          ? entry.eventAt
+          : entry && entry.updatedAt
+            ? entry.updatedAt
+            : null;
+    return {
+      key: `payload:${entry.payload}`,
+      kind: "payload",
+      preview: entry.payload,
+      eventAt,
+      firstSeenAt: eventAt,
+      lastSeenAt: eventAt,
+      seenCount: 1,
+    };
+  }
+
+  function listPassiveQueueRuntimeEntries() {
+    return [...passiveQueueRuntime.entries.values()].sort((left, right) =>
+      String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""), "en-US")
+    );
+  }
+
+  function removePassiveQueueRuntimeEntry(key) {
+    if (!key) {
+      return false;
+    }
+    return passiveQueueRuntime.entries.delete(key);
+  }
+
+  function clearPassiveQueueRuntime() {
+    passiveQueueRuntime.entries.clear();
+  }
+
+  function buildPassiveQueueEntryFromEvent(entry) {
+    const updatedAt =
+      entry && entry.eventAtMs > 0
+        ? new Date(entry.eventAtMs).toISOString()
+        : entry && entry.eventAt
+          ? entry.eventAt
+          : entry && entry.updatedAt
+            ? entry.updatedAt
+            : null;
+    return {
+      key: buildCacheKey(entry.region, entry.realm, entry.characterName),
+      region: entry.region,
+      realm: entry.realm,
+      characterName: entry.characterName,
+      source: entry.source,
+      requestOrigin: "passive-live",
+      updatedAt,
+      firstSeenAt: updatedAt,
+      lastSeenAt: entry.eventAtMs > 0 ? Math.floor(entry.eventAtMs / 1000) : toUnixSecondsFromIso(updatedAt),
+      seenCount: 1,
+      sequence: entry.sequence,
+      channelName: entry.channelName,
+      sessionId: entry.sessionId,
+      payload: entry.payload,
+      applicantID: entry.applicantID,
+      groupID: entry.groupID,
+      memberIndex: entry.memberIndex,
+      assignedRole: entry.assignedRole,
+      class: entry.class,
+      itemLevel: entry.itemLevel,
+      level: entry.level,
+    };
+  }
+
+  function upsertPassiveQueueRuntimeEntry(entry) {
+    const candidate = buildPassiveQueueEntryFromEvent(entry);
+    passiveQueueRuntime.entries.set(
+      candidate.key,
+      pickPreferredPassiveQueueEntry(passiveQueueRuntime.entries.get(candidate.key), candidate)
+    );
+  }
+
+  function buildBrokeredPassiveLiveFeedState(rawState) {
+    if (!rawState) {
+      return null;
+    }
+
+    return {
+      ...rawState,
+      events: [...passiveBrokerRuntime.events],
+      eventCount: passiveBrokerRuntime.events.length,
+    };
   }
 
   function buildPassiveEventIdentity(entry) {
@@ -801,8 +903,8 @@ async function createDashboardServer(options = {}) {
   function isAfterPassiveCursor(entry) {
     const eventAtMs = Number((entry && entry.eventAtMs) || 0);
     const sequence = Number((entry && entry.sequence) || 0);
-    const cursorEventAtMs = Number(lfgRuntime.lastPassiveEventAtMs || 0);
-    const cursorSequence = Number(lfgRuntime.lastPassiveEventSequence || 0);
+    const cursorEventAtMs = Number(passiveBrokerRuntime.lastEventAtMs || 0);
+    const cursorSequence = Number(passiveBrokerRuntime.lastEventSequence || 0);
     if (eventAtMs !== cursorEventAtMs) {
       return eventAtMs > cursorEventAtMs;
     }
@@ -815,11 +917,11 @@ async function createDashboardServer(options = {}) {
     }
 
     const key = buildPassiveEventIdentity(entry);
-    if (lfgRuntime.pendingPassiveEvents.some((pendingEntry) => pendingEntry.key === key)) {
+    if (passiveBrokerRuntime.pendingEvents.some((pendingEntry) => pendingEntry.key === key)) {
       return false;
     }
 
-    lfgRuntime.pendingPassiveEvents.push({
+    passiveBrokerRuntime.pendingEvents.push({
       key,
       event: entry,
       queuedAtMs,
@@ -828,28 +930,29 @@ async function createDashboardServer(options = {}) {
   }
 
   function advancePassiveCursor(entry) {
-    lfgRuntime.lastPassiveEventAtMs = Number((entry && entry.eventAtMs) || 0);
-    lfgRuntime.lastPassiveEventSequence = Number((entry && entry.sequence) || 0);
+    passiveBrokerRuntime.lastEventAtMs = Number((entry && entry.eventAtMs) || 0);
+    passiveBrokerRuntime.lastEventSequence = Number((entry && entry.sequence) || 0);
   }
 
   function flushPendingPassiveEvents(nowMs, force = false) {
-    if (!Array.isArray(lfgRuntime.pendingPassiveEvents) || lfgRuntime.pendingPassiveEvents.length === 0) {
-      return;
+    if (!Array.isArray(passiveBrokerRuntime.pendingEvents) || passiveBrokerRuntime.pendingEvents.length === 0) {
+      return [];
     }
 
-    const oldestQueuedAtMs = Number(lfgRuntime.pendingPassiveEvents[0].queuedAtMs || 0);
+    const oldestQueuedAtMs = Number(passiveBrokerRuntime.pendingEvents[0].queuedAtMs || 0);
     const shouldFlush =
       force ||
-      lfgRuntime.pendingPassiveEvents.length >= passiveEventBatchMaxSize ||
+      passiveBrokerRuntime.pendingEvents.length >= passiveEventBatchMaxSize ||
       (oldestQueuedAtMs > 0 && nowMs - oldestQueuedAtMs >= passiveEventBatchMaxAgeMs);
     if (!shouldFlush) {
-      return;
+      return [];
     }
 
-    const pendingEvents = [...lfgRuntime.pendingPassiveEvents]
+    const pendingEvents = [...passiveBrokerRuntime.pendingEvents]
       .map((entry) => entry.event)
       .sort(comparePassiveEventOrder);
-    lfgRuntime.pendingPassiveEvents = [];
+    passiveBrokerRuntime.pendingEvents = [];
+    const flushedEvents = [];
 
     for (const entry of pendingEvents) {
       const sequence = Number(entry.sequence || 0);
@@ -857,20 +960,17 @@ async function createDashboardServer(options = {}) {
         continue;
       }
 
-      if (entry.source === "appclear") {
-        lfgRuntime.entries.clear();
-      } else if (entry.source === "applicant") {
-        upsertLfgRuntimeEntry(entry, "passive-live");
-      }
-
-      lfgRuntime.lastPassiveSequence = Math.max(lfgRuntime.lastPassiveSequence, sequence);
       advancePassiveCursor(entry);
-      lfgRuntime.latestLiveEventAtMs = Math.max(
-        lfgRuntime.latestLiveEventAtMs,
-        Number(entry.eventAtMs || 0),
-        Date.parse(entry.updatedAt || "") || 0
+      passiveBrokerRuntime.events = [...passiveBrokerRuntime.events, buildPassiveLogEvent(entry)].slice(
+        -PASSIVE_BROKER_EVENT_LIMIT
       );
+      if (entry.source !== "appclear") {
+        upsertPassiveQueueRuntimeEntry(entry);
+      }
+      flushedEvents.push(entry);
     }
+
+    return flushedEvents;
   }
 
   function normalizeLfgRuntimeEntry(entry, origin) {
@@ -894,7 +994,31 @@ async function createDashboardServer(options = {}) {
       return;
     }
 
-    lfgRuntime.entries.set(buildLfgRuntimeKey(normalized), normalized);
+    const key = buildLfgRuntimeKey(normalized);
+    const existing = lfgRuntime.entries.get(key);
+    if (existing) {
+      const existingRecency = {
+        eventAtMs:
+          Number(existing.eventAtMs || 0) ||
+          Date.parse(existing.updatedAt || "") ||
+          Number(existing.lastSeenAt || 0) * 1000,
+        sequence: Number(existing.sequence || 0),
+        payload: existing.payload || `${existing.characterName}:${existing.realm}`,
+      };
+      const candidateRecency = {
+        eventAtMs:
+          Number(normalized.eventAtMs || 0) ||
+          Date.parse(normalized.updatedAt || "") ||
+          Number(normalized.lastSeenAt || 0) * 1000,
+        sequence: Number(normalized.sequence || 0),
+        payload: normalized.payload || `${normalized.characterName}:${normalized.realm}`,
+      };
+      if (comparePassiveEventOrder(candidateRecency, existingRecency) < 0) {
+        return;
+      }
+    }
+
+    lfgRuntime.entries.set(key, normalized);
   }
 
   function listLfgRuntimeEntries() {
@@ -940,6 +1064,47 @@ async function createDashboardServer(options = {}) {
     });
   }
 
+  function syncPassiveEventBroker(passiveBridge, passiveLiveFeedState) {
+    const brokeredLiveFeedState = buildBrokeredPassiveLiveFeedState(passiveLiveFeedState);
+    if (!passiveBridge || passiveBridge.enabled !== true) {
+      return {
+        sessionKey: null,
+        events: [],
+        passiveLiveFeedState: brokeredLiveFeedState,
+        passiveLiveQueue: listPassiveQueueRuntimeEntries(),
+      };
+    }
+
+    const passiveLiveScope = buildPassiveLiveScope(passiveBridge, passiveLiveFeedState);
+    const passiveSessionKey = buildPassiveSessionKey(passiveBridge, passiveLiveScope);
+    if (passiveSessionKey !== passiveBrokerRuntime.sessionKey) {
+      resetPassiveBrokerCursor(passiveSessionKey);
+    }
+
+    const nowMs = Date.now();
+    const liveEvents = selectPassiveLiveEvents(passiveBridge, passiveLiveFeedState).sort(comparePassiveEventOrder);
+
+    let sawNewEvent = false;
+    for (const entry of liveEvents) {
+      sawNewEvent = queuePendingPassiveEvent(entry, nowMs) || sawNewEvent;
+    }
+
+    const shouldForceFlush =
+      liveEvents.some((entry) => entry.source === "appclear") ||
+      passiveBrokerRuntime.pendingEvents.length >= passiveEventBatchMaxSize;
+    const flushedEvents =
+      sawNewEvent || passiveBrokerRuntime.pendingEvents.length > 0
+        ? flushPendingPassiveEvents(nowMs, shouldForceFlush)
+        : [];
+
+    return {
+      sessionKey: passiveSessionKey,
+      events: flushedEvents,
+      passiveLiveFeedState: buildBrokeredPassiveLiveFeedState(passiveLiveFeedState),
+      passiveLiveQueue: listPassiveQueueRuntimeEntries(),
+    };
+  }
+
   function syncLfgRuntimeFromSavedVariables(savedVariablesSnapshot) {
     if (!savedVariablesSnapshot || savedVariablesSnapshot.lastModifiedMs == null) {
       return;
@@ -968,36 +1133,33 @@ async function createDashboardServer(options = {}) {
     }
   }
 
-  function syncLfgRuntimeFromPassiveLive(passiveBridge, passiveLiveFeedState) {
-    if (!passiveBridge || passiveBridge.enabled !== true) {
+  function syncLfgRuntimeFromPassiveBroker(passiveBridge, brokerSnapshot) {
+    if (!passiveBridge || passiveBridge.enabled !== true || !brokerSnapshot) {
       return;
     }
 
-    const passiveLiveScope = buildPassiveLiveScope(passiveBridge, passiveLiveFeedState);
-    const passiveSessionKey = buildPassiveSessionKey(passiveBridge, passiveLiveScope);
+    const passiveSessionKey = brokerSnapshot.sessionKey || null;
     if (passiveSessionKey !== lfgRuntime.passiveSessionKey) {
       resetLfgRuntimeState();
       lfgRuntime.passiveSessionKey = passiveSessionKey;
-      lfgRuntime.lastPassiveSequence = 0;
-      lfgRuntime.lastPassiveEventSequence = 0;
-      lfgRuntime.lastPassiveEventAtMs = 0;
     }
 
-    const nowMs = Date.now();
-    const liveEvents = selectPassiveLiveEvents(passiveBridge, passiveLiveFeedState)
-      .filter((entry) => entry.source === "applicant" || entry.source === "appclear")
-      .sort(comparePassiveEventOrder);
+    for (const entry of brokerSnapshot.events || []) {
+      if (entry.source !== "applicant" && entry.source !== "appclear") {
+        continue;
+      }
 
-    let sawNewEvent = false;
-    for (const entry of liveEvents) {
-      sawNewEvent = queuePendingPassiveEvent(entry, nowMs) || sawNewEvent;
-    }
+      if (entry.source === "appclear") {
+        lfgRuntime.entries.clear();
+      } else {
+        upsertLfgRuntimeEntry(entry, "passive-live");
+      }
 
-    const shouldForceFlush =
-      liveEvents.some((entry) => entry.source === "appclear") ||
-      lfgRuntime.pendingPassiveEvents.length >= passiveEventBatchMaxSize;
-    if (sawNewEvent || lfgRuntime.pendingPassiveEvents.length > 0) {
-      flushPendingPassiveEvents(nowMs, shouldForceFlush);
+      lfgRuntime.latestLiveEventAtMs = Math.max(
+        lfgRuntime.latestLiveEventAtMs,
+        Number(entry.eventAtMs || 0),
+        Date.parse(entry.updatedAt || "") || 0
+      );
     }
   }
 
@@ -1060,12 +1222,13 @@ async function createDashboardServer(options = {}) {
     const cache = loadCache(dbPath);
     const savedVariables = loadSavedVariablesSnapshot(accountRoot);
     const passiveBridge = normalizePassiveBridge(savedVariables.parsed.passiveBridge);
-    const passiveLiveFeedState =
+    const rawPassiveLiveFeedState =
       typeof passiveLiveFeedStateOverride === "function"
         ? passiveLiveFeedStateOverride()
         : passiveLiveFeedStateOverride || (passiveLiveFeedMonitor ? passiveLiveFeedMonitor.snapshot() : null);
+    const brokerSnapshot = syncPassiveEventBroker(passiveBridge, rawPassiveLiveFeedState);
     syncLfgRuntimeFromSavedVariables(savedVariables);
-    syncLfgRuntimeFromPassiveLive(passiveBridge, passiveLiveFeedState);
+    syncLfgRuntimeFromPassiveBroker(passiveBridge, brokerSnapshot);
 
     return buildDashboardState({
       dbPath,
@@ -1074,7 +1237,8 @@ async function createDashboardServer(options = {}) {
       savedVariablesOverride: savedVariables,
       applicantsOverride: listLfgRuntimeEntries(),
       autoSyncState: getAutoSyncState(),
-      passiveLiveFeedState,
+      passiveLiveFeedState: brokerSnapshot.passiveLiveFeedState,
+      passiveLiveQueueOverride: brokerSnapshot.passiveLiveQueue,
     });
   }
 
@@ -1240,6 +1404,7 @@ async function createDashboardServer(options = {}) {
         const existingQueueEntry = (beforeState.queue || []).find((entry) => entry.key === key) || null;
         const cache = loadCache(dbPath);
         const manualRemoved = removeManualRequest(cache, key);
+        removePassiveQueueRuntimeEntry(key);
 
         const savedVariables = pickLatestSavedVariablesFile(accountRoot);
         const savedVariablesRemoved = savedVariables
@@ -1272,6 +1437,7 @@ async function createDashboardServer(options = {}) {
         const beforeState = snapshotState();
         const cache = loadCache(dbPath);
         const manualRemoved = clearManualRequests(cache);
+        clearPassiveQueueRuntime();
 
         const savedVariables = pickLatestSavedVariablesFile(accountRoot);
         const savedVariablesRemoved = savedVariables
@@ -1320,9 +1486,10 @@ async function createDashboardServer(options = {}) {
         }
 
         resetLfgRuntimeState();
-        lfgRuntime.lastPassiveEventAtMs = Date.now();
-        lfgRuntime.lastPassiveEventSequence = Number.MAX_SAFE_INTEGER;
-        lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, lfgRuntime.lastPassiveEventAtMs);
+        passiveBrokerRuntime.lastEventAtMs = Date.now();
+        passiveBrokerRuntime.lastEventSequence = Number.MAX_SAFE_INTEGER;
+        passiveBrokerRuntime.pendingEvents = [];
+        lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, passiveBrokerRuntime.lastEventAtMs);
 
         jsonResponse(response, 200, {
           ok: true,

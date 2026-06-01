@@ -934,9 +934,16 @@ function comparePassiveLogRecency(left, right) {
   return rightSequence - leftSequence;
 }
 
+function getPassiveLogSourceEntries(liveFeed) {
+  if (liveFeed && Array.isArray(liveFeed.events) && liveFeed.events.length > 0) {
+    return liveFeed.events;
+  }
+  return liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
+}
+
 function resolveVisiblePassiveSession(passive, liveFeed) {
   const candidates = [];
-  const liveEntries = liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
+  const liveEntries = getPassiveLogSourceEntries(liveFeed);
 
   for (const entry of liveEntries) {
     if (!entry || entry.kind !== "payload" || !entry.preview) {
@@ -973,7 +980,7 @@ function resolveVisiblePassiveSession(passive, liveFeed) {
 
 function buildPassiveLogEntries(passive, liveFeed) {
   const merged = new Map();
-  const liveEntries = liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
+  const liveEntries = getPassiveLogSourceEntries(liveFeed);
   const messageLog = Array.isArray(passive && passive.messageLog) ? passive.messageLog : [];
   const activeChannelName = passive && passive.channelName ? passive.channelName : null;
   const activeSessionId = resolveVisiblePassiveSession(passive, liveFeed);
