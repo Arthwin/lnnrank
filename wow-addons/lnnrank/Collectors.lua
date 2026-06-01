@@ -190,6 +190,9 @@ local function onApplicantMemberMouseUp(self, button)
     end
 
     local lookup = resolveApplicantLookup(self)
+    if type(lookup) == "table" then
+        lookup.userQueued = true
+    end
     local request = queueLookupPayload(lookup, "applicant")
     if request then
         if type(addon.TryPublishRequestToPassiveChannel) == "function" then
@@ -206,6 +209,9 @@ local function onApplicantRowMouseUp(self, button)
 
     local queued = 0
     for _, lookup in ipairs(self.wclApplicantLookups or {}) do
+        if type(lookup) == "table" then
+            lookup.userQueued = true
+        end
         local request = queueLookupPayload(lookup, "applicant")
         if request then
             if type(addon.TryPublishRequestToPassiveChannel) == "function" then
@@ -457,6 +463,23 @@ local function ensurePlayerQueuedForRefresh()
     })
 end
 
+local function publishApplicantClearEvent(region)
+    if type(addon.TryPublishRequestToPassiveChannel) ~= "function" or
+        type(addon.IsPassiveChannelEnabled) ~= "function" or
+        not addon.IsPassiveChannelEnabled() then
+        return false
+    end
+
+    local playerName = type(UnitName) == "function" and UnitName("player") or "player"
+    local playerRealm = type(GetRealmName) == "function" and GetRealmName() or "realm"
+    return addon.TryPublishRequestToPassiveChannel({
+        region = region,
+        realm = playerRealm,
+        characterName = playerName,
+        source = "appclear",
+    })
+end
+
 local function collectApplicants()
     local region = addon.GetCurrentRegionSlug()
     local entries = {}
@@ -464,12 +487,14 @@ local function collectApplicants()
     local applicantGroupsById = {}
 
     if not addon.ShouldScanApplicants() or type(C_LFGList) ~= "table" or type(C_LFGList.GetApplicants) ~= "function" then
+        publishApplicantClearEvent(region)
         addon.PruneQueuedRequestsBySource("applicant", entries)
         addon.ReplaceSnapshotBucket("applicants", entries)
         refreshApplicantFrameBindings(applicantGroups, applicantGroupsById)
         return
     end
 
+    publishApplicantClearEvent(region)
     local applicants = C_LFGList.GetApplicants() or {}
     for index = 1, #applicants do
         local applicantInfo = C_LFGList.GetApplicantInfo(applicants[index])

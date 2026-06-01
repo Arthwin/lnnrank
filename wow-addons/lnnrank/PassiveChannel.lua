@@ -19,6 +19,7 @@ local lastPublishedPayload = nil
 local passiveChannelName = nil
 local passivePlayerKey = nil
 local passiveSessionId = nil
+local passiveWritePending = false
 local publishSequence = 0
 local PASSIVE_LOG_LIMIT = 40
 
@@ -204,6 +205,18 @@ local function getPassiveMessageLog()
     return bridge.messageLog
 end
 
+local function setPassiveWritePending(isPending)
+    local nextValue = isPending == true
+    if passiveWritePending == nextValue then
+        return
+    end
+
+    passiveWritePending = nextValue
+    if type(addon.NotifyStateChanged) == "function" then
+        addon.NotifyStateChanged()
+    end
+end
+
 local function appendPassiveMessageLogEntry(request, payload)
     local messageLog = getPassiveMessageLog()
     local sequence = publishSequence
@@ -316,11 +329,16 @@ function addon.SetPassiveChannelEnabled(enabled)
         return
     end
 
+    setPassiveWritePending(false)
     if passiveChannelName and type(LeaveChannelByName) == "function" then
         pcall(LeaveChannelByName, passiveChannelName)
     end
     leaveStalePassiveChannels(nil)
     syncPassiveBridgeState()
+end
+
+function addon.IsPassiveWritePending()
+    return passiveWritePending == true
 end
 
 function addon.GetPassiveChannelDebugState()
@@ -345,6 +363,7 @@ function addon.TryPublishRequestToPassiveChannel(request)
 
     local channelNumber = ensurePassiveChannel()
     if not channelNumber or type(SendChatMessage) ~= "function" then
+        setPassiveWritePending(true)
         return false
     end
 
@@ -355,6 +374,9 @@ function addon.TryPublishRequestToPassiveChannel(request)
         lastPublishedPayload = payload
         appendPassiveMessageLogEntry(request, payload)
         hideChannelEverywhere(passiveChannelName)
+        setPassiveWritePending(false)
+    else
+        setPassiveWritePending(true)
     end
     syncPassiveBridgeState()
 

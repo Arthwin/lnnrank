@@ -1336,16 +1336,7 @@ function requestClearResultsCache() {
 }
 
 function requestClearLfgApplicants() {
-  openConfirmModal({
-    title: "Clear LFG applicants?",
-    message:
-      "This clears the persisted LFG applicant snapshot from the tab. Queue and cache data stay intact, and active live applicants may reappear.",
-    confirmLabel: "Clear LFG",
-    onConfirm: () => {
-      closeConfirmModal({ restoreFocus: false });
-      void clearLfgApplicants();
-    },
-  });
+  void clearLfgApplicants();
 }
 
 async function clearQueue() {

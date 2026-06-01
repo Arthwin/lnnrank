@@ -252,7 +252,11 @@ function buildPassiveLiveQueue(passiveLiveFeedState) {
       continue;
     }
 
-    const updatedAt = liveEntry.firstSeenAt || liveEntry.lastSeenAt || null;
+    if (payload.source === "appclear") {
+      continue;
+    }
+
+    const updatedAt = liveEntry.lastSeenAt || liveEntry.firstSeenAt || null;
     const key = buildCacheKey(payload.region, payload.realm, payload.characterName);
     const candidate = {
       key,
@@ -285,9 +289,18 @@ function buildPassiveLiveQueue(passiveLiveFeedState) {
   );
 }
 
-function filterActivePassiveLiveQueue(passiveLiveQueue, nowMs) {
+function filterActivePassiveLiveQueue(passiveLiveQueue, nowMs, passiveBridge) {
   const applicantCutoff = Math.floor(nowMs / 1000) - LIVE_APPLICANT_TTL_SECONDS;
-  return (passiveLiveQueue || []).filter((entry) => {
+  const scopedEntries = (passiveLiveQueue || []).filter((entry) => {
+    if (!passiveBridge || !passiveBridge.channelName) {
+      return true;
+    }
+    if (entry.channelName != null && entry.channelName !== passiveBridge.channelName) {
+      return false;
+    }
+    return !passiveBridge.sessionId || entry.sessionId === passiveBridge.sessionId;
+  });
+  return scopedEntries.filter((entry) => {
     if (entry.source !== "applicant") {
       return true;
     }
@@ -454,15 +467,21 @@ function buildDashboardState(options = {}) {
     ? path.resolve(String(options.accountRoot))
     : DEFAULT_WOW_ACCOUNT_ROOT;
   const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
-  const cache = loadCache(dbPath);
-  const savedVariables = loadSavedVariablesSnapshot(accountRoot);
+  const cache = options.cacheOverride || loadCache(dbPath);
+  const savedVariables = options.savedVariablesOverride || loadSavedVariablesSnapshot(accountRoot);
   const passiveBridge = normalizePassiveBridge(savedVariables.parsed.passiveBridge);
-  const passiveLiveQueue = filterActivePassiveLiveQueue(buildPassiveLiveQueue(options.passiveLiveFeedState), nowMs);
+  const passiveLiveQueue = filterActivePassiveLiveQueue(
+    buildPassiveLiveQueue(options.passiveLiveFeedState),
+    nowMs,
+    passiveBridge
+  );
   const queue = buildUnifiedQueue(cache, savedVariables.parsed.requests || [], passiveLiveQueue);
   const liveApplicants = passiveLiveQueue.filter((entry) => entry.source === "applicant");
-  const applicants = shouldPreferLiveApplicants(passiveBridge, options.passiveLiveFeedState)
-    ? liveApplicants
-    : mergeCharacterEntries(savedVariables.parsed.applicants, liveApplicants);
+  const applicants = Array.isArray(options.applicantsOverride)
+    ? options.applicantsOverride
+    : shouldPreferLiveApplicants(passiveBridge, options.passiveLiveFeedState)
+      ? liveApplicants
+      : mergeCharacterEntries(savedVariables.parsed.applicants, liveApplicants);
 
   return {
     meta: {
@@ -592,6 +611,171 @@ async function createDashboardServer(options = {}) {
   };
   const passiveLiveFeedMonitor =
     options.enablePassiveLiveFeed === true ? createPassiveLiveFeedMonitor(options.passiveLiveFeedOptions) : null;
+  const lfgRuntime = {
+    entries: new Map(),
+    lastSavedVariablesModifiedMs: null,
+    lastPassiveSequence: 0,
+    passiveSessionKey: null,
+    latestLiveEventAtMs: 0,
+  };
+
+  function buildLfgRuntimeKey(entry) {
+    if (entry.applicantID != null) {
+      return `applicant:${entry.applicantID}:${entry.memberIndex || 0}`;
+    }
+    return entry.key || buildCacheKey(entry.region, entry.realm, entry.characterName || entry.name);
+  }
+
+  function resetLfgRuntimeState() {
+    lfgRuntime.entries.clear();
+  }
+
+  function normalizeLfgRuntimeEntry(entry, origin) {
+    if (!entry || !entry.region || !entry.realm || !(entry.characterName || entry.name)) {
+      return null;
+    }
+
+    const characterName = entry.characterName || entry.name;
+    return {
+      ...entry,
+      key: buildCacheKey(entry.region, entry.realm, characterName),
+      characterName,
+      source: entry.source || "applicant",
+      requestOrigin: origin || entry.requestOrigin || "savedvariables",
+    };
+  }
+
+  function upsertLfgRuntimeEntry(entry, origin) {
+    const normalized = normalizeLfgRuntimeEntry(entry, origin);
+    if (!normalized) {
+      return;
+    }
+
+    lfgRuntime.entries.set(buildLfgRuntimeKey(normalized), normalized);
+  }
+
+  function listLfgRuntimeEntries() {
+    return [...lfgRuntime.entries.values()].sort((left, right) => {
+      const leftSeenAt = Number(left.lastSeenAt || 0);
+      const rightSeenAt = Number(right.lastSeenAt || 0);
+      if (leftSeenAt !== rightSeenAt) {
+        return rightSeenAt - leftSeenAt;
+      }
+      return String(left.characterName || "").localeCompare(String(right.characterName || ""), "en-US");
+    });
+  }
+
+  function buildPassiveSessionKey(passiveBridge) {
+    if (!passiveBridge || passiveBridge.enabled !== true || !passiveBridge.channelName) {
+      return null;
+    }
+    return `${passiveBridge.channelName}::${passiveBridge.sessionId || ""}`;
+  }
+
+  function selectPassiveLiveEvents(passiveBridge, passiveLiveFeedState) {
+    const liveEntries =
+      passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [];
+    const parsedEntries = liveEntries
+      .filter((entry) => entry && entry.kind === "payload" && typeof entry.preview === "string")
+      .map((entry) => {
+        const payload = parsePassivePayload(entry.preview);
+        if (!payload) {
+          return null;
+        }
+        return {
+          ...payload,
+          updatedAt: entry.lastSeenAt || entry.firstSeenAt || null,
+          lastSeenAt: toUnixSecondsFromIso(entry.lastSeenAt || entry.firstSeenAt),
+        };
+      })
+      .filter(Boolean);
+
+    if (!passiveBridge || !passiveBridge.channelName) {
+      return parsedEntries;
+    }
+
+    const channelEntries = parsedEntries.filter((entry) => entry.channelName === passiveBridge.channelName);
+    if (channelEntries.length === 0) {
+      return parsedEntries;
+    }
+
+    if (passiveBridge.sessionId) {
+      const sessionEntries = channelEntries.filter((entry) => entry.sessionId === passiveBridge.sessionId);
+      return sessionEntries;
+    }
+
+    return channelEntries;
+  }
+
+  function syncLfgRuntimeFromSavedVariables(savedVariablesSnapshot) {
+    if (!savedVariablesSnapshot || savedVariablesSnapshot.lastModifiedMs == null) {
+      return;
+    }
+
+    if (
+      Number.isFinite(lfgRuntime.latestLiveEventAtMs) &&
+      lfgRuntime.latestLiveEventAtMs > 0 &&
+      savedVariablesSnapshot.lastModifiedMs < lfgRuntime.latestLiveEventAtMs
+    ) {
+      if (savedVariablesSnapshot.file) {
+        clearLnnrankSavedVariablesApplicants(savedVariablesSnapshot.file);
+      }
+      lfgRuntime.lastSavedVariablesModifiedMs = savedVariablesSnapshot.lastModifiedMs;
+      return;
+    }
+
+    if (savedVariablesSnapshot.lastModifiedMs === lfgRuntime.lastSavedVariablesModifiedMs) {
+      return;
+    }
+
+    lfgRuntime.lastSavedVariablesModifiedMs = savedVariablesSnapshot.lastModifiedMs;
+    resetLfgRuntimeState();
+    for (const entry of savedVariablesSnapshot.parsed.applicants || []) {
+      upsertLfgRuntimeEntry(entry, "savedvariables");
+    }
+  }
+
+  function syncLfgRuntimeFromPassiveLive(passiveBridge, passiveLiveFeedState) {
+    if (!passiveBridge || passiveBridge.enabled !== true) {
+      return;
+    }
+
+    const passiveSessionKey = buildPassiveSessionKey(passiveBridge);
+    if (passiveSessionKey !== lfgRuntime.passiveSessionKey) {
+      lfgRuntime.passiveSessionKey = passiveSessionKey;
+      lfgRuntime.lastPassiveSequence = 0;
+    }
+
+    const liveEvents = selectPassiveLiveEvents(passiveBridge, passiveLiveFeedState)
+      .filter((entry) => entry.source === "applicant" || entry.source === "appclear")
+      .sort((left, right) => {
+        const leftSequence = Number(left.sequence || 0);
+        const rightSequence = Number(right.sequence || 0);
+        if (leftSequence !== rightSequence) {
+          return leftSequence - rightSequence;
+        }
+        return String(left.updatedAt || "").localeCompare(String(right.updatedAt || ""), "en-US");
+      });
+
+    for (const entry of liveEvents) {
+      const sequence = Number(entry.sequence || 0);
+      if (!Number.isFinite(sequence) || sequence <= lfgRuntime.lastPassiveSequence) {
+        continue;
+      }
+
+      if (entry.source === "appclear") {
+        resetLfgRuntimeState();
+      } else {
+        upsertLfgRuntimeEntry(entry, "passive-live");
+      }
+
+      lfgRuntime.lastPassiveSequence = sequence;
+      const updatedAtMs = Date.parse(entry.updatedAt || "");
+      if (Number.isFinite(updatedAtMs)) {
+        lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, updatedAtMs);
+      }
+    }
+  }
 
   function publishCompanionFromCache(cache) {
     const payload = buildCompanionPayload(listCachedRecords(cache), {
@@ -649,11 +833,21 @@ async function createDashboardServer(options = {}) {
   }
 
   function snapshotState() {
+    const cache = loadCache(dbPath);
+    const savedVariables = loadSavedVariablesSnapshot(accountRoot);
+    const passiveBridge = normalizePassiveBridge(savedVariables.parsed.passiveBridge);
+    const passiveLiveFeedState = passiveLiveFeedMonitor ? passiveLiveFeedMonitor.snapshot() : null;
+    syncLfgRuntimeFromSavedVariables(savedVariables);
+    syncLfgRuntimeFromPassiveLive(passiveBridge, passiveLiveFeedState);
+
     return buildDashboardState({
       dbPath,
       accountRoot,
+      cacheOverride: cache,
+      savedVariablesOverride: savedVariables,
+      applicantsOverride: listLfgRuntimeEntries(),
       autoSyncState: getAutoSyncState(),
-      passiveLiveFeedState: passiveLiveFeedMonitor ? passiveLiveFeedMonitor.snapshot() : null,
+      passiveLiveFeedState,
     });
   }
 
@@ -679,6 +873,8 @@ async function createDashboardServer(options = {}) {
         const beforeState = snapshotState();
         if (!force && beforeState.meta.queueCount === 0) {
           autoSync.scheduled = false;
+          autoSync.currentLookup = null;
+          autoSync.queueLength = 0;
           return {
             skipped: true,
             reason: "queue-empty",
@@ -706,12 +902,21 @@ async function createDashboardServer(options = {}) {
           installWow: true,
           onUpdate: async (update) => {
             autoSync.lastUpdate = update;
-            autoSync.currentLookup = update.lookup || update.request || null;
-            autoSync.queueLength = update.queueLength || autoSync.queueLength;
-            autoSync.statusCount = update.statusCount || 0;
+            autoSync.currentLookup =
+              Object.prototype.hasOwnProperty.call(update, "lookup") ||
+              Object.prototype.hasOwnProperty.call(update, "request")
+                ? update.lookup || update.request || null
+                : autoSync.currentLookup;
+            if (Object.prototype.hasOwnProperty.call(update, "queueLength")) {
+              autoSync.queueLength = update.queueLength;
+            }
+            if (Object.prototype.hasOwnProperty.call(update, "statusCount")) {
+              autoSync.statusCount = update.statusCount;
+            }
           },
         });
         autoSync.lastResult = result;
+        autoSync.currentLookup = null;
         return result;
       } catch (error) {
         autoSync.lastError = error.message || "Auto sync failed.";
@@ -721,6 +926,8 @@ async function createDashboardServer(options = {}) {
         autoSync.lastFinishedAt = new Date().toISOString();
 
         const afterState = snapshotState();
+        autoSync.currentLookup = null;
+        autoSync.queueLength = afterState.meta.queueCount;
         if (afterState.meta.queueCount > 0) {
           scheduleAutoSync(2500);
         } else {
@@ -877,14 +1084,14 @@ async function createDashboardServer(options = {}) {
       }
 
       if (request.method === "POST" && requestUrl.pathname === "/api/lfg/clear") {
-        const savedVariables = pickLatestSavedVariablesFile(accountRoot);
-        const savedVariablesCleared = savedVariables
-          ? clearLnnrankSavedVariablesApplicants(savedVariables.path)
-          : { filePath: null, cleared: false, removed: 0 };
+        const savedVariables = loadSavedVariablesSnapshot(accountRoot);
+        if (savedVariables && savedVariables.lastModifiedMs != null) {
+          lfgRuntime.lastSavedVariablesModifiedMs = savedVariables.lastModifiedMs;
+        }
+        resetLfgRuntimeState();
 
         jsonResponse(response, 200, {
           ok: true,
-          savedVariablesCleared,
           state: snapshotState(),
         });
         return;

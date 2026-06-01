@@ -49,8 +49,28 @@ local function getQueuedRequestCount()
     return 0
 end
 
+local function getAttentionRequestCount()
+    local db = getDb()
+    if type(db) ~= "table" or type(db.requests) ~= "table" then
+        return 0
+    end
+
+    local queued = 0
+    for _, request in pairs(db.requests) do
+        if type(request) == "table" and request.userQueued == true then
+            queued = queued + 1
+        end
+    end
+
+    return queued
+end
+
+local function hasPendingPassiveWrite()
+    return type(addon.IsPassiveWritePending) == "function" and addon.IsPassiveWritePending()
+end
+
 local function needsRefresh()
-    return getQueuedRequestCount() > 0
+    return getAttentionRequestCount() > 0 or hasPendingPassiveWrite()
 end
 
 local function getLfgRestoreMode()
@@ -140,12 +160,16 @@ local function updateTooltip()
         return
     end
 
-    local queued = getQueuedRequestCount()
+    local queued = getAttentionRequestCount()
+    local backgroundQueued = math.max(0, getQueuedRequestCount() - queued)
     local statusText
     local statusColor
 
-    if needsRefresh() then
-        statusText = string.format("Refresh needed (%d queued lookup%s)", queued, queued == 1 and "" or "s")
+    if hasPendingPassiveWrite() then
+        statusText = "Passive relay pending"
+        statusColor = "|cffff7f7f"
+    elseif queued > 0 then
+        statusText = string.format("Refresh needed (%d ctrl-click lookup%s)", queued, queued == 1 and "" or "s")
         statusColor = "|cffff7f7f"
     else
         statusText = "Up to date"
@@ -154,8 +178,17 @@ local function updateTooltip()
 
     GameTooltip:SetOwner(button, "ANCHOR_LEFT")
     GameTooltip:ClearLines()
-    GameTooltip:AddLine("LÑÑRank")
+    GameTooltip:AddLine("LNNRank")
     GameTooltip:AddLine(statusColor .. statusText .. "|r")
+    if backgroundQueued > 0 then
+        GameTooltip:AddLine(
+            string.format("%d background lookup%s queued quietly.", backgroundQueued, backgroundQueued == 1 and "" or "s"),
+            0.82,
+            0.82,
+            0.82,
+            true
+        )
+    end
     GameTooltip:AddLine("Left-click to reload and import new data.", 1, 1, 1, true)
     GameTooltip:AddLine("If LFG was open when you clicked, it will reopen after the reload.", 1, 1, 1, true)
     GameTooltip:AddLine("Right-click to open settings.", 1, 1, 1, true)

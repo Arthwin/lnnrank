@@ -12,9 +12,10 @@ const HELPER_DLL_PATH = path.join(HELPER_OUTPUT_DIR, "PassiveLiveScanner.dll");
 const DEFAULT_SCAN_INTERVAL_MS = 1500;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 25000;
 const DEFAULT_READ_TIMEOUT_MS = 3000;
-const DEFAULT_MAX_MATCHES = 4;
+const DEFAULT_MAX_MATCHES = 24;
 const DEFAULT_CONTEXT_BYTES = 192;
 const LIVE_ENTRY_LIMIT = 40;
+const DEFAULT_DISCOVERY_REFRESH_MS = 5000;
 
 let helperBuildPromise = null;
 
@@ -291,7 +292,7 @@ function selectPassiveAddressCandidates(scanResult) {
     })
     .filter((entry) => Number.isFinite(entry.numericAddress) && entry.numericAddress > 0)
     .sort((left, right) => right.priority - left.priority || left.numericAddress - right.numericAddress)
-    .slice(0, 3)
+    .slice(0, 12)
     .map((entry) => `0x${entry.numericAddress.toString(16).toUpperCase("en-US")}`);
 }
 
@@ -326,6 +327,11 @@ function createPassiveLiveFeedMonitor(options = {}) {
     1500,
     Number.parseInt(String(options.scanIntervalMs || DEFAULT_SCAN_INTERVAL_MS), 10) || DEFAULT_SCAN_INTERVAL_MS
   );
+  const discoveryRefreshMs = Math.max(
+    scanIntervalMs * 2,
+    Number.parseInt(String(options.discoveryRefreshMs || DEFAULT_DISCOVERY_REFRESH_MS), 10) ||
+      DEFAULT_DISCOVERY_REFRESH_MS
+  );
   const discoveryRetryIntervalMs = Math.max(scanIntervalMs, 12000);
   const state = {
     supported: process.platform === "win32",
@@ -334,6 +340,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
     discoveryPattern: null,
     wowProcessId: null,
     lastScannedAt: null,
+    lastDiscoveredAt: null,
     lastError: null,
     scanDurationMs: null,
     discoveryAddresses: [],
@@ -346,6 +353,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
     state.discoveryPattern = null;
     state.wowProcessId = null;
     state.lastScannedAt = null;
+    state.lastDiscoveredAt = null;
     state.lastError = null;
     state.scanDurationMs = null;
     state.discoveryAddresses = [];
@@ -367,6 +375,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
       const existing = merged.get(entry.key);
       if (existing) {
         existing.lastSeenAt = observedAtIso;
+        existing.seenCount = Number(existing.seenCount || 0) + 1;
         existing.address = entry.address;
         existing.encoding = entry.encoding;
         existing.kind = entry.kind;
@@ -377,6 +386,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
         ...entry,
         firstSeenAt: observedAtIso,
         lastSeenAt: observedAtIso,
+        seenCount: 1,
       });
     }
 
@@ -429,6 +439,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
     }
 
     const lastScanMs = Date.parse(state.lastScannedAt || "");
+    const lastDiscoveryMs = Date.parse(state.lastDiscoveredAt || "");
     const activeIntervalMs =
       Array.isArray(state.discoveryAddresses) && state.discoveryAddresses.length > 0
         ? scanIntervalMs
@@ -453,21 +464,27 @@ function createPassiveLiveFeedMonitor(options = {}) {
       }
 
       state.wowProcessId = wowProcess.processId;
-      const result =
-        Array.isArray(state.discoveryAddresses) && state.discoveryAddresses.length > 0
-          ? await readPassiveMemoryAddresses({
-              processId: wowProcess.processId,
-              addresses: state.discoveryAddresses,
-            })
-          : await discoverPassiveChannelMemory({
-              processId: wowProcess.processId,
-              channelName: discoveryPattern,
-            });
+      const shouldRediscover =
+        !Array.isArray(state.discoveryAddresses) ||
+        state.discoveryAddresses.length === 0 ||
+        !Number.isFinite(lastDiscoveryMs) ||
+        Date.now() - lastDiscoveryMs >= discoveryRefreshMs;
+      const result = shouldRediscover
+        ? await discoverPassiveChannelMemory({
+            processId: wowProcess.processId,
+            channelName: discoveryPattern,
+            maxMatches: options.maxMatches || DEFAULT_MAX_MATCHES,
+          })
+        : await readPassiveMemoryAddresses({
+            processId: wowProcess.processId,
+            addresses: state.discoveryAddresses,
+          });
       const observedAtIso = new Date().toISOString();
       const nextEntries = extractPassiveLiveFeedEntries(result);
       mergeEntries(nextEntries, observedAtIso);
-      if (!state.discoveryAddresses.length) {
+      if (shouldRediscover || !state.discoveryAddresses.length) {
         state.discoveryAddresses = selectPassiveAddressCandidates(result);
+        state.lastDiscoveredAt = observedAtIso;
       }
       if (!nextEntries.some((entry) => entry.kind === "payload")) {
         state.discoveryAddresses = [];
