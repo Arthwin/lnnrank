@@ -766,6 +766,7 @@ function renderPassive(data) {
     typeof passive.lastPublishedPayload === "string" && passive.lastPublishedPayload.trim() !== ""
       ? passive.lastPublishedPayload
       : null;
+  const messageLog = Array.isArray(passive.messageLog) ? passive.messageLog : [];
   const playerLabel = [passive.playerName, passive.realm].filter(Boolean).join("-") || "Unknown";
   const regionLabel = passive.region ? String(passive.region).toUpperCase() : "Unknown";
 
@@ -778,6 +779,7 @@ function renderPassive(data) {
       <div class="summary-grid passive-summary-grid">
         ${createSummaryItem("Status", statusLabel)}
         ${createSummaryItem("Sequence", formatCompactNumber(passive.sequence ?? 0, 0))}
+        ${createSummaryItem("Messages", formatCompactNumber(passive.messageCount ?? messageLog.length, 0))}
         ${createSummaryItem(
           "Last Publish",
           passive.lastPublishedAtIso ? formatDate(passive.lastPublishedAtIso) : "None yet"
@@ -820,6 +822,36 @@ function renderPassive(data) {
         }
       </section>
     </div>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Received Messages</h2>
+        <p>The app-side view of payloads captured in the latest SavedVariables snapshot.</p>
+      </div>
+      ${
+        messageLog.length
+          ? `<div class="message-log">
+              ${messageLog
+                .map(
+                  (entry) => `
+                    <article class="message-log-row">
+                      <div class="message-log-meta">
+                        <span>${escapeHtml(entry.publishedAtIso ? formatDate(entry.publishedAtIso) : "Unknown time")}</span>
+                        <span>seq ${escapeHtml(formatCompactNumber(entry.sequence ?? 0, 0))}</span>
+                        <span>${escapeHtml(formatSourceLabel(entry.source || "wow"))}</span>
+                        <span>${escapeHtml(
+                          [entry.characterName, entry.realm].filter(Boolean).join("-") || "Unknown character"
+                        )}</span>
+                      </div>
+                      <pre class="code-block message-log-payload">${escapeHtml(entry.payload || "")}</pre>
+                    </article>
+                  `
+                )
+                .join("")}
+            </div>`
+          : createEmpty("No passive messages have been persisted yet.")
+      }
+    </section>
   `;
 }
 

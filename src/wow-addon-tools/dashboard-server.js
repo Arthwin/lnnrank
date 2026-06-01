@@ -117,8 +117,27 @@ function normalizePassiveBridge(passiveBridge) {
     return null;
   }
 
+  const messageLog = Array.isArray(passiveBridge.messageLog)
+    ? [...passiveBridge.messageLog]
+        .map((entry) => ({
+          ...entry,
+          publishedAtIso: toIsoFromUnix(entry.publishedAt),
+        }))
+        .sort((left, right) => {
+          const leftSequence = Number(left.sequence || 0);
+          const rightSequence = Number(right.sequence || 0);
+          if (leftSequence !== rightSequence) {
+            return rightSequence - leftSequence;
+          }
+          return Number(right.publishedAt || 0) - Number(left.publishedAt || 0);
+        })
+    : [];
+
   return {
     ...passiveBridge,
+    messageCount:
+      typeof passiveBridge.messageCount === "number" ? passiveBridge.messageCount : messageLog.length,
+    messageLog,
     lastPublishedAtIso: toIsoFromUnix(passiveBridge.lastPublishedAt),
     updatedAtIso: toIsoFromUnix(passiveBridge.updatedAt),
   };

@@ -93,6 +93,27 @@ lnnrankDB = {
     ["sequence"] = 4,
     ["lastPublishedAt"] = 1748650400,
     ["lastPublishedPayload"] = "LNNRANK|ch=lnnrankf24cf41109|ss=f24cf41109|n=4|rg=us|re=Stormrage|nm=Urmomgargles|sr=unit",
+    ["messageCount"] = 2,
+    ["messageLog"] = {
+      [3] = {
+        ["sequence"] = 3,
+        ["publishedAt"] = 1748650390,
+        ["payload"] = "LNNRANK|ch=lnnrankf24cf41109|ss=f24cf41109|n=3|rg=us|re=Stormrage|nm=Earlier|sr=unit",
+        ["region"] = "us",
+        ["realm"] = "Stormrage",
+        ["characterName"] = "Earlier",
+        ["source"] = "unit",
+      },
+      [4] = {
+        ["sequence"] = 4,
+        ["publishedAt"] = 1748650400,
+        ["payload"] = "LNNRANK|ch=lnnrankf24cf41109|ss=f24cf41109|n=4|rg=us|re=Stormrage|nm=Urmomgargles|sr=unit",
+        ["region"] = "us",
+        ["realm"] = "Stormrage",
+        ["characterName"] = "Urmomgargles",
+        ["source"] = "unit",
+      },
+    },
     ["updatedAt"] = 1748650401,
   },
   ["lastImportedBuild"] = "2026-05-31T00:00:00.000Z",
@@ -115,6 +136,9 @@ lnnrankDB = {
   assert.equal(parsed.passiveBridge.channelName, "lnnrankf24cf41109");
   assert.equal(parsed.passiveBridge.playerKey, "0f24cf41");
   assert.equal(parsed.passiveBridge.sequence, 4);
+  assert.equal(parsed.passiveBridge.messageCount, 2);
+  assert.equal(parsed.passiveBridge.messageLog.length, 2);
+  assert.equal(parsed.passiveBridge.messageLog[1].sequence, 4);
 });
 
 test("saved variables queue clearing preserves non-queue snapshot data", () => {
@@ -588,6 +612,27 @@ test("dashboard auto sync recovers after an earlier queue-empty skip", async () 
         '    ["playerKey"] = "0f24cf41",\n' +
         '    ["sessionId"] = "f24cf41109",\n' +
         '    ["sequence"] = 4,\n' +
+        '    ["messageCount"] = 2,\n' +
+        '    ["messageLog"] = {\n' +
+        '      [3] = {\n' +
+        '        ["sequence"] = 3,\n' +
+        '        ["publishedAt"] = 1748650390,\n' +
+        '        ["payload"] = "LNNRANK|ch=lnnrankf24cf41109|n=3",\n' +
+        '        ["region"] = "us",\n' +
+        '        ["realm"] = "Stormrage",\n' +
+        '        ["characterName"] = "Earlier",\n' +
+        '        ["source"] = "unit",\n' +
+        '      },\n' +
+        '      [4] = {\n' +
+        '        ["sequence"] = 4,\n' +
+        '        ["publishedAt"] = 1748650400,\n' +
+        '        ["payload"] = "LNNRANK|ch=lnnrankf24cf41109|n=4",\n' +
+        '        ["region"] = "us",\n' +
+        '        ["realm"] = "Stormrage",\n' +
+        '        ["characterName"] = "Urmomgargles",\n' +
+        '        ["source"] = "unit",\n' +
+        '      },\n' +
+        '    },\n' +
         '    ["lastPublishedPayload"] = "LNNRANK|ch=lnnrankf24cf41109",\n' +
         '    ["updatedAt"] = 1748650401,'
     );
@@ -597,6 +642,9 @@ test("dashboard auto sync recovers after an earlier queue-empty skip", async () 
     assert.equal(statePayload.passiveBridge.channelName, "lnnrankf24cf41109");
     assert.equal(statePayload.passiveBridge.playerKey, "0f24cf41");
     assert.equal(statePayload.passiveBridge.updatedAtIso, "2025-05-31T00:13:21.000Z");
+    assert.equal(statePayload.passiveBridge.messageCount, 2);
+    assert.equal(statePayload.passiveBridge.messageLog.length, 2);
+    assert.equal(statePayload.passiveBridge.messageLog[0].sequence, 4);
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

@@ -235,6 +235,66 @@ function parseObjectEntries(block, fieldNames) {
   return entries.filter((entry) => entry.region && entry.realm && entry.characterName);
 }
 
+function parseKeyedTableEntries(block, fieldNames) {
+  const entries = [];
+  const entryPattern = /\[(?:"([^"]+)"|(\d+))\]\s*=\s*\{/gu;
+  let match;
+
+  while ((match = entryPattern.exec(block)) !== null) {
+    const key = match[1] ?? match[2];
+    const bodyStart = match.index + match[0].length - 1;
+    let index = bodyStart;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (; index < block.length; index += 1) {
+      const character = block[index];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (character === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (character === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (character === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (character === "{") {
+        depth += 1;
+        continue;
+      }
+
+      if (character === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          const body = block.slice(bodyStart + 1, index);
+          const entry = { key };
+          for (const fieldName of fieldNames) {
+            entry[fieldName] = extractScalarField(body, fieldName);
+          }
+          entries.push(entry);
+          entryPattern.lastIndex = index + 1;
+          break;
+        }
+      }
+    }
+  }
+
+  return entries;
+}
+
 function parseRequestEntries(requestsBlock) {
   return parseObjectEntries(requestsBlock, [
     "region",
@@ -284,6 +344,8 @@ function parsePassiveBridge(block) {
     return null;
   }
 
+  const messageLogBlock = extractTableBlock(block, "messageLog");
+
   const passiveBridge = {
     enabled: extractScalarField(block, "enabled"),
     joined: extractScalarField(block, "joined"),
@@ -297,10 +359,26 @@ function parsePassiveBridge(block) {
     sequence: extractScalarField(block, "sequence"),
     lastPublishedAt: extractScalarField(block, "lastPublishedAt"),
     lastPublishedPayload: extractScalarField(block, "lastPublishedPayload"),
+    messageCount: extractScalarField(block, "messageCount"),
+    messageLog:
+      messageLogBlock == null
+        ? []
+        : parseKeyedTableEntries(messageLogBlock, [
+            "sequence",
+            "publishedAt",
+            "payload",
+            "region",
+            "realm",
+            "characterName",
+            "source",
+          ]),
     updatedAt: extractScalarField(block, "updatedAt"),
   };
 
-  return Object.values(passiveBridge).some((value) => value != null) ? passiveBridge : null;
+  const hasScalarFields = Object.entries(passiveBridge).some(
+    ([key, value]) => key !== "messageLog" && value != null
+  );
+  return hasScalarFields || passiveBridge.messageLog.length > 0 ? passiveBridge : null;
 }
 
 function parseLnnrankSavedVariables(text) {

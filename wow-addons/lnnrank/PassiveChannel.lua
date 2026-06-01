@@ -20,6 +20,7 @@ local passiveChannelName = nil
 local passivePlayerKey = nil
 local passiveSessionId = nil
 local publishSequence = 0
+local PASSIVE_LOG_LIMIT = 40
 
 local function sanitizeSegment(value, maxLength)
     local text = tostring(value or "")
@@ -174,6 +175,47 @@ local function getPassiveBridgeTable()
     return db.passiveBridge
 end
 
+local function getPassiveMessageLog()
+    local bridge = getPassiveBridgeTable()
+    if type(bridge.messageLog) ~= "table" then
+        bridge.messageLog = {}
+    end
+    return bridge.messageLog
+end
+
+local function appendPassiveMessageLogEntry(request, payload)
+    local messageLog = getPassiveMessageLog()
+    local sequence = publishSequence
+    local entryKey = tostring(sequence)
+
+    messageLog[entryKey] = {
+        sequence = sequence,
+        publishedAt = getNowUnix(),
+        payload = payload,
+        region = request.region,
+        realm = request.realm,
+        characterName = request.characterName,
+        source = request.source,
+    }
+
+    local keys = {}
+    for key, value in pairs(messageLog) do
+        if type(value) == "table" and type(value.sequence) == "number" then
+            table.insert(keys, key)
+        end
+    end
+
+    table.sort(keys, function(left, right)
+        local leftSeq = type(messageLog[left]) == "table" and messageLog[left].sequence or 0
+        local rightSeq = type(messageLog[right]) == "table" and messageLog[right].sequence or 0
+        return leftSeq > rightSeq
+    end)
+
+    for index = PASSIVE_LOG_LIMIT + 1, #keys do
+        messageLog[keys[index]] = nil
+    end
+end
+
 local function syncPassiveBridgeState()
     local channelName = passiveChannelName or buildPassiveChannelName()
     local bridge = getPassiveBridgeTable()
@@ -190,6 +232,10 @@ local function syncPassiveBridgeState()
     bridge.sequence = publishSequence
     bridge.lastPublishedAt = lastPublishedAt
     bridge.lastPublishedPayload = lastPublishedPayload
+    bridge.messageCount = 0
+    for _ in pairs(getPassiveMessageLog()) do
+        bridge.messageCount = bridge.messageCount + 1
+    end
     bridge.updatedAt = getNowUnix()
 end
 
@@ -262,6 +308,7 @@ function addon.TryPublishRequestToPassiveChannel(request)
     if ok then
         lastPublishedAt = getNowUnix()
         lastPublishedPayload = payload
+        appendPassiveMessageLogEntry(request, payload)
         hideChannelEverywhere(passiveChannelName)
     end
     syncPassiveBridgeState()
