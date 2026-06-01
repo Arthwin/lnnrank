@@ -868,6 +868,155 @@ test("dashboard state keeps saved snapshot applicants when live feed only has ch
   assert.equal(state.applicants[0].applicantID, 9);
 });
 
+test("dashboard state follows the newest passive live session instead of a stale saved session id", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-passive-session-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {',
+      '    ["us:sargeras:oldsession"] = {',
+      '      ["region"] = "us",',
+      '      ["realm"] = "Sargeras",',
+      '      ["characterName"] = "Oldsession",',
+      '      ["source"] = "applicant",',
+      '      ["applicantID"] = 11,',
+      '      ["memberIndex"] = 1,',
+      '      ["assignedRole"] = "DAMAGER",',
+      '      ["lastSeenAt"] = 1780272010,',
+      "    },",
+      "  },",
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf42108",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const state = buildDashboardState({
+    dbPath,
+    accountRoot,
+    passiveLiveFeedState: {
+      supported: true,
+      status: "ready",
+      entries: [
+        {
+          key: "payload:old-applicant",
+          kind: "payload",
+          preview:
+            "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf42108|n=44|rg=us|re=Sargeras|nm=Oldsession|sr=applicant|ai=11|mi=1|ar=DAMAGER|cl=MAGE|il=279.4|lv=90",
+          firstSeenAt: "2026-06-01T00:00:02.000Z",
+          lastSeenAt: "2026-06-01T00:00:04.000Z",
+        },
+        {
+          key: "payload:new-clear",
+          kind: "payload",
+          preview: "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf43629|n=120|rg=us|re=Stormrage|nm=Urmomgargles|sr=appclear",
+          firstSeenAt: "2026-06-01T00:00:09.000Z",
+          lastSeenAt: "2026-06-01T00:00:10.000Z",
+        },
+        {
+          key: "payload:new-applicant",
+          kind: "payload",
+          preview:
+            "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf43629|n=121|rg=us|re=Stormrage|nm=Freshone|sr=applicant|ai=22|mi=1|ar=HEALER|cl=PRIEST|il=287.6|lv=90",
+          firstSeenAt: "2026-06-01T00:00:10.000Z",
+          lastSeenAt: "2026-06-01T00:00:11.000Z",
+        },
+      ],
+    },
+    nowMs: Date.parse("2026-06-01T00:00:13.000Z"),
+  });
+
+  assert.equal(state.queue.length, 1);
+  assert.equal(state.queue[0].characterName, "Freshone");
+  assert.equal(state.queue[0].applicantID, 22);
+  assert.equal(state.applicants.length, 1);
+  assert.equal(state.applicants[0].characterName, "Freshone");
+  assert.equal(state.applicants[0].applicantID, 22);
+});
+
+test("dashboard state drops applicants that were superseded by a newer live appclear", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-passive-appclear-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf43629",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const state = buildDashboardState({
+    dbPath,
+    accountRoot,
+    passiveLiveFeedState: {
+      supported: true,
+      status: "ready",
+      entries: [
+        {
+          key: "payload:applicant-before-clear",
+          kind: "payload",
+          preview:
+            "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf43629|n=77|rg=us|re=Stormrage|nm=Earlierone|sr=applicant|ai=22|mi=1|ar=HEALER|cl=PRIEST|il=287.6|lv=90",
+          firstSeenAt: "2026-06-01T00:00:08.000Z",
+          lastSeenAt: "2026-06-01T00:00:09.000Z",
+        },
+        {
+          key: "payload:new-clear",
+          kind: "payload",
+          preview: "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf43629|n=78|rg=us|re=Stormrage|nm=Urmomgargles|sr=appclear",
+          firstSeenAt: "2026-06-01T00:00:09.000Z",
+          lastSeenAt: "2026-06-01T00:00:10.000Z",
+        },
+      ],
+    },
+    nowMs: Date.parse("2026-06-01T00:00:11.000Z"),
+  });
+
+  assert.equal(state.queue.length, 0);
+  assert.equal(state.applicants.length, 0);
+});
+
 test("dev runtime bootstraps an isolated dashboard sandbox inside the chosen root", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dev-run-"));
   const runtimePaths = buildDevRuntimePaths(tempDir);
@@ -887,6 +1036,101 @@ test("dev runtime bootstraps an isolated dashboard sandbox inside the chosen roo
   );
   assert.deepEqual(parsedSavedVariables.requests, []);
   assert.deepEqual(JSON.parse(fs.readFileSync(runtimePaths.dbPath, "utf8")).records, {});
+});
+
+test("dashboard server snapshot applies live applicants from the newest passive session", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-live-session-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {',
+      '    ["us:sargeras:oldsession"] = {',
+      '      ["region"] = "us",',
+      '      ["realm"] = "Sargeras",',
+      '      ["characterName"] = "Oldsession",',
+      '      ["source"] = "applicant",',
+      '      ["applicantID"] = 11,',
+      "    },",
+      "  },",
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf42108",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: {
+      supported: true,
+      status: "ready",
+      entries: [
+        {
+          key: "payload:new-clear",
+          kind: "payload",
+          preview: "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf43629|n=120|rg=us|re=Stormrage|nm=Urmomgargles|sr=appclear",
+          firstSeenAt: "2026-06-01T00:00:09.000Z",
+          lastSeenAt: "2026-06-01T00:00:10.000Z",
+        },
+        {
+          key: "payload:new-applicant",
+          kind: "payload",
+          preview:
+            "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf43629|n=121|rg=us|re=Stormrage|nm=Freshone|sr=applicant|ai=22|mi=1|ar=HEALER|cl=PRIEST|il=287.6|lv=90",
+          firstSeenAt: "2026-06-01T00:00:10.000Z",
+          lastSeenAt: "2026-06-01T00:00:11.000Z",
+        },
+      ],
+    },
+    testHooks,
+  });
+
+  try {
+    const state = testHooks.snapshotState();
+    assert.equal(state.applicants.length, 1);
+    assert.equal(state.applicants[0].characterName, "Freshone");
+    assert.equal(state.applicants[0].applicantID, 22);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
 });
 
 test("dashboard auto sync recovers after an earlier queue-empty skip", async () => {

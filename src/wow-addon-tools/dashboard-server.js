@@ -215,6 +215,98 @@ function parsePassivePayload(payload) {
   };
 }
 
+function parsePassiveLiveEntries(passiveLiveFeedState) {
+  const liveEntries =
+    passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [];
+
+  return liveEntries
+    .filter((entry) => entry && entry.kind === "payload" && typeof entry.preview === "string")
+    .map((entry) => {
+      const payload = parsePassivePayload(entry.preview);
+      if (!payload) {
+        return null;
+      }
+      return {
+        ...payload,
+        updatedAt: entry.lastSeenAt || entry.firstSeenAt || null,
+        lastSeenAt: toUnixSecondsFromIso(entry.lastSeenAt || entry.firstSeenAt),
+      };
+    })
+    .filter(Boolean);
+}
+
+function comparePassiveLiveEntryRecency(left, right) {
+  const leftParsed = Date.parse((left && left.updatedAt) || "");
+  const rightParsed = Date.parse((right && right.updatedAt) || "");
+  const leftUpdatedAtMs = Number.isFinite(leftParsed) ? leftParsed : 0;
+  const rightUpdatedAtMs = Number.isFinite(rightParsed) ? rightParsed : 0;
+  if (leftUpdatedAtMs !== rightUpdatedAtMs) {
+    return rightUpdatedAtMs - leftUpdatedAtMs;
+  }
+
+  const leftSequence = Number((left && left.sequence) || 0);
+  const rightSequence = Number((right && right.sequence) || 0);
+  if (leftSequence !== rightSequence) {
+    return rightSequence - leftSequence;
+  }
+
+  return String((right && right.payload) || "").localeCompare(String((left && left.payload) || ""), "en-US");
+}
+
+function resolveActivePassiveSessionId(entries, fallbackSessionId) {
+  const actionableEntries = (entries || []).filter((entry) => entry && entry.sessionId);
+  const appclearEntry = actionableEntries
+    .filter((entry) => entry.source === "appclear")
+    .sort(comparePassiveLiveEntryRecency)[0];
+  if (appclearEntry) {
+    return appclearEntry.sessionId;
+  }
+
+  const applicantEntry = actionableEntries
+    .filter((entry) => entry.source === "applicant")
+    .sort(comparePassiveLiveEntryRecency)[0];
+  if (applicantEntry) {
+    return applicantEntry.sessionId;
+  }
+
+  const recentEntry = actionableEntries.sort(comparePassiveLiveEntryRecency)[0];
+  return (recentEntry && recentEntry.sessionId) || fallbackSessionId || null;
+}
+
+function buildPassiveLiveScope(passiveBridge, passiveLiveFeedState) {
+  const parsedEntries = parsePassiveLiveEntries(passiveLiveFeedState);
+  const preferredChannelName = passiveBridge && passiveBridge.channelName ? passiveBridge.channelName : null;
+  const fallbackSessionId = passiveBridge && passiveBridge.sessionId;
+
+  if (!preferredChannelName) {
+    const sessionId = resolveActivePassiveSessionId(parsedEntries, fallbackSessionId);
+    const sessionEntries = sessionId ? parsedEntries.filter((entry) => entry.sessionId === sessionId) : parsedEntries;
+    const latestApplicantClearSequence = sessionEntries
+      .filter((entry) => entry.source === "appclear")
+      .reduce((latest, entry) => Math.max(latest, Number(entry.sequence || 0) || 0), 0);
+    return {
+      channelName: null,
+      sessionId,
+      latestApplicantClearSequence,
+      entries: parsedEntries,
+    };
+  }
+
+  const channelEntries = parsedEntries.filter((entry) => entry.channelName === preferredChannelName);
+  const scopedEntries = channelEntries.length ? channelEntries : parsedEntries;
+  const sessionId = resolveActivePassiveSessionId(scopedEntries, fallbackSessionId);
+  const sessionEntries = sessionId ? scopedEntries.filter((entry) => entry.sessionId === sessionId) : scopedEntries;
+  const latestApplicantClearSequence = sessionEntries
+    .filter((entry) => entry.source === "appclear")
+    .reduce((latest, entry) => Math.max(latest, Number(entry.sequence || 0) || 0), 0);
+  return {
+    channelName: preferredChannelName,
+    sessionId,
+    latestApplicantClearSequence,
+    entries: scopedEntries,
+  };
+}
+
 function pickPreferredPassiveQueueEntry(existing, candidate) {
   if (!existing) {
     return candidate;
@@ -289,35 +381,39 @@ function buildPassiveLiveQueue(passiveLiveFeedState) {
   );
 }
 
-function filterActivePassiveLiveQueue(passiveLiveQueue, nowMs, passiveBridge) {
+function filterActivePassiveLiveQueue(passiveLiveQueue, nowMs, passiveLiveScope) {
   const applicantCutoff = Math.floor(nowMs / 1000) - LIVE_APPLICANT_TTL_SECONDS;
   const scopedEntries = (passiveLiveQueue || []).filter((entry) => {
-    if (!passiveBridge || !passiveBridge.channelName) {
+    if (!passiveLiveScope || !passiveLiveScope.channelName) {
       return true;
     }
-    if (entry.channelName != null && entry.channelName !== passiveBridge.channelName) {
+    if (entry.channelName != null && entry.channelName !== passiveLiveScope.channelName) {
       return false;
     }
-    return !passiveBridge.sessionId || entry.sessionId === passiveBridge.sessionId;
+    return !passiveLiveScope.sessionId || entry.sessionId === passiveLiveScope.sessionId;
   });
   return scopedEntries.filter((entry) => {
     if (entry.source !== "applicant") {
       return true;
+    }
+    const clearSequence = Number((passiveLiveScope && passiveLiveScope.latestApplicantClearSequence) || 0);
+    const sequence = Number(entry.sequence || 0);
+    if (clearSequence > 0 && sequence <= clearSequence) {
+      return false;
     }
     return Number(entry.lastSeenAt || 0) >= applicantCutoff;
   });
 }
 
 function shouldPreferLiveApplicants(passiveBridge, passiveLiveFeedState) {
-  const liveEntries =
-    passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [];
-  const hasApplicantPayload = liveEntries.some(
-    (entry) =>
-      entry &&
-      entry.kind === "payload" &&
-      typeof entry.preview === "string" &&
-      entry.preview.includes("|sr=applicant")
-  );
+  const passiveLiveScope = buildPassiveLiveScope(passiveBridge, passiveLiveFeedState);
+  const clearSequence = Number(passiveLiveScope.latestApplicantClearSequence || 0);
+  const hasApplicantPayload = passiveLiveScope.entries.some((entry) => {
+    if (entry.source !== "applicant") {
+      return false;
+    }
+    return clearSequence <= 0 || Number(entry.sequence || 0) > clearSequence;
+  });
 
   return Boolean(
     passiveBridge &&
@@ -470,10 +566,11 @@ function buildDashboardState(options = {}) {
   const cache = options.cacheOverride || loadCache(dbPath);
   const savedVariables = options.savedVariablesOverride || loadSavedVariablesSnapshot(accountRoot);
   const passiveBridge = normalizePassiveBridge(savedVariables.parsed.passiveBridge);
+  const passiveLiveScope = buildPassiveLiveScope(passiveBridge, options.passiveLiveFeedState);
   const passiveLiveQueue = filterActivePassiveLiveQueue(
     buildPassiveLiveQueue(options.passiveLiveFeedState),
     nowMs,
-    passiveBridge
+    passiveLiveScope
   );
   const queue = buildUnifiedQueue(cache, savedVariables.parsed.requests || [], passiveLiveQueue);
   const liveApplicants = passiveLiveQueue.filter((entry) => entry.source === "applicant");
@@ -611,6 +708,7 @@ async function createDashboardServer(options = {}) {
   };
   const passiveLiveFeedMonitor =
     options.enablePassiveLiveFeed === true ? createPassiveLiveFeedMonitor(options.passiveLiveFeedOptions) : null;
+  const passiveLiveFeedStateOverride = options.passiveLiveFeedStateOverride;
   const lfgRuntime = {
     entries: new Map(),
     lastSavedVariablesModifiedMs: null,
@@ -665,46 +763,36 @@ async function createDashboardServer(options = {}) {
     });
   }
 
-  function buildPassiveSessionKey(passiveBridge) {
-    if (!passiveBridge || passiveBridge.enabled !== true || !passiveBridge.channelName) {
+  function buildPassiveSessionKey(passiveBridge, passiveLiveScope) {
+    const channelName =
+      (passiveLiveScope && passiveLiveScope.channelName) || (passiveBridge && passiveBridge.channelName) || null;
+    if (!passiveBridge || passiveBridge.enabled !== true || !channelName) {
       return null;
     }
-    return `${passiveBridge.channelName}::${passiveBridge.sessionId || ""}`;
+    const sessionId =
+      (passiveLiveScope && passiveLiveScope.sessionId) || (passiveBridge && passiveBridge.sessionId) || "";
+    return `${channelName}::${sessionId}`;
   }
 
   function selectPassiveLiveEvents(passiveBridge, passiveLiveFeedState) {
-    const liveEntries =
-      passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [];
-    const parsedEntries = liveEntries
-      .filter((entry) => entry && entry.kind === "payload" && typeof entry.preview === "string")
-      .map((entry) => {
-        const payload = parsePassivePayload(entry.preview);
-        if (!payload) {
-          return null;
-        }
-        return {
-          ...payload,
-          updatedAt: entry.lastSeenAt || entry.firstSeenAt || null,
-          lastSeenAt: toUnixSecondsFromIso(entry.lastSeenAt || entry.firstSeenAt),
-        };
-      })
-      .filter(Boolean);
-
-    if (!passiveBridge || !passiveBridge.channelName) {
-      return parsedEntries;
-    }
-
-    const channelEntries = parsedEntries.filter((entry) => entry.channelName === passiveBridge.channelName);
-    if (channelEntries.length === 0) {
-      return parsedEntries;
-    }
-
-    if (passiveBridge.sessionId) {
-      const sessionEntries = channelEntries.filter((entry) => entry.sessionId === passiveBridge.sessionId);
+    const passiveLiveScope = buildPassiveLiveScope(passiveBridge, passiveLiveFeedState);
+    const sessionEntries = passiveLiveScope.sessionId
+      ? passiveLiveScope.entries.filter((entry) => entry.sessionId === passiveLiveScope.sessionId)
+      : passiveLiveScope.entries;
+    const clearSequence = Number(passiveLiveScope.latestApplicantClearSequence || 0);
+    if (clearSequence <= 0) {
       return sessionEntries;
     }
 
-    return channelEntries;
+    return sessionEntries.filter((entry) => {
+      if (entry.source === "appclear") {
+        return Number(entry.sequence || 0) === clearSequence;
+      }
+      if (entry.source === "applicant") {
+        return Number(entry.sequence || 0) > clearSequence;
+      }
+      return true;
+    });
   }
 
   function syncLfgRuntimeFromSavedVariables(savedVariablesSnapshot) {
@@ -740,7 +828,8 @@ async function createDashboardServer(options = {}) {
       return;
     }
 
-    const passiveSessionKey = buildPassiveSessionKey(passiveBridge);
+    const passiveLiveScope = buildPassiveLiveScope(passiveBridge, passiveLiveFeedState);
+    const passiveSessionKey = buildPassiveSessionKey(passiveBridge, passiveLiveScope);
     if (passiveSessionKey !== lfgRuntime.passiveSessionKey) {
       lfgRuntime.passiveSessionKey = passiveSessionKey;
       lfgRuntime.lastPassiveSequence = 0;
@@ -836,7 +925,10 @@ async function createDashboardServer(options = {}) {
     const cache = loadCache(dbPath);
     const savedVariables = loadSavedVariablesSnapshot(accountRoot);
     const passiveBridge = normalizePassiveBridge(savedVariables.parsed.passiveBridge);
-    const passiveLiveFeedState = passiveLiveFeedMonitor ? passiveLiveFeedMonitor.snapshot() : null;
+    const passiveLiveFeedState =
+      typeof passiveLiveFeedStateOverride === "function"
+        ? passiveLiveFeedStateOverride()
+        : passiveLiveFeedStateOverride || (passiveLiveFeedMonitor ? passiveLiveFeedMonitor.snapshot() : null);
     syncLfgRuntimeFromSavedVariables(savedVariables);
     syncLfgRuntimeFromPassiveLive(passiveBridge, passiveLiveFeedState);
 
@@ -961,7 +1053,7 @@ async function createDashboardServer(options = {}) {
         if (state.meta.queueCount > 0) {
           scheduleAutoSync(100);
         }
-        if (passiveLiveFeedMonitor && state.passiveBridge) {
+        if (!passiveLiveFeedStateOverride && passiveLiveFeedMonitor && state.passiveBridge) {
           void passiveLiveFeedMonitor.refresh(state.passiveBridge);
         }
         jsonResponse(response, 200, state);
@@ -1132,7 +1224,7 @@ async function createDashboardServer(options = {}) {
         if (state.meta.queueCount > 0) {
           scheduleAutoSync(100);
         }
-        if (passiveLiveFeedMonitor && state.passiveBridge) {
+        if (!passiveLiveFeedStateOverride && passiveLiveFeedMonitor && state.passiveBridge) {
           void passiveLiveFeedMonitor.refresh(state.passiveBridge);
         }
       }, backgroundTickMs);

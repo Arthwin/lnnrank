@@ -920,10 +920,63 @@ function getHiddenLiveLogIds() {
   return new Set(state.liveLogHiddenIds);
 }
 
+function comparePassiveLogRecency(left, right) {
+  const leftParsed = Date.parse((left && left.sortAt) || "");
+  const rightParsed = Date.parse((right && right.sortAt) || "");
+  const leftSortAtMs = Number.isFinite(leftParsed) ? leftParsed : 0;
+  const rightSortAtMs = Number.isFinite(rightParsed) ? rightParsed : 0;
+  if (leftSortAtMs !== rightSortAtMs) {
+    return rightSortAtMs - leftSortAtMs;
+  }
+
+  const leftSequence = Number((left && left.sequence) || 0);
+  const rightSequence = Number((right && right.sequence) || 0);
+  return rightSequence - leftSequence;
+}
+
+function resolveVisiblePassiveSession(passive, liveFeed) {
+  const candidates = [];
+  const liveEntries = liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
+
+  for (const entry of liveEntries) {
+    if (!entry || entry.kind !== "payload" || !entry.preview) {
+      continue;
+    }
+
+    const parsed = parsePassivePayloadEnvelope(entry.preview);
+    if (!parsed || !parsed.sessionId) {
+      continue;
+    }
+
+    candidates.push({
+      source: parsed.source,
+      sessionId: parsed.sessionId,
+      sortAt: entry.lastSeenAt || entry.firstSeenAt || null,
+      sequence: parsed.sequence,
+    });
+  }
+
+  const appclearCandidate = candidates.filter((entry) => entry.source === "appclear").sort(comparePassiveLogRecency)[0];
+  if (appclearCandidate) {
+    return appclearCandidate.sessionId;
+  }
+
+  const applicantCandidate = candidates
+    .filter((entry) => entry.source === "applicant")
+    .sort(comparePassiveLogRecency)[0];
+  if (applicantCandidate) {
+    return applicantCandidate.sessionId;
+  }
+
+  return passive && passive.sessionId ? passive.sessionId : null;
+}
+
 function buildPassiveLogEntries(passive, liveFeed) {
   const merged = new Map();
   const liveEntries = liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
   const messageLog = Array.isArray(passive && passive.messageLog) ? passive.messageLog : [];
+  const activeChannelName = passive && passive.channelName ? passive.channelName : null;
+  const activeSessionId = resolveVisiblePassiveSession(passive, liveFeed);
 
   function upsertEntry(id, candidate) {
     const existing = merged.get(id);
@@ -954,6 +1007,15 @@ function buildPassiveLogEntries(passive, liveFeed) {
     if (!parsed) {
       continue;
     }
+    if (parsed.source === "appclear") {
+      continue;
+    }
+    if (activeChannelName && parsed.channelName && parsed.channelName !== activeChannelName) {
+      continue;
+    }
+    if (activeSessionId && parsed.sessionId && parsed.sessionId !== activeSessionId) {
+      continue;
+    }
 
     upsertEntry(`payload:${entry.preview}`, {
       id: `payload:${entry.preview}`,
@@ -972,6 +1034,15 @@ function buildPassiveLogEntries(passive, liveFeed) {
     }
 
     const parsed = parsePassivePayloadEnvelope(entry.payload);
+    if (parsed && parsed.source === "appclear") {
+      continue;
+    }
+    if (parsed && activeChannelName && parsed.channelName && parsed.channelName !== activeChannelName) {
+      continue;
+    }
+    if (parsed && activeSessionId && parsed.sessionId && parsed.sessionId !== activeSessionId) {
+      continue;
+    }
     upsertEntry(`payload:${entry.payload}`, {
       id: `payload:${entry.payload}`,
       sortAt: entry.publishedAtIso || null,
