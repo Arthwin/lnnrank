@@ -35,6 +35,7 @@ const { formatIsoTimestamp } = require("../mplus-matrix/utils");
 const { runAddonRequestSync } = require("./sync-service");
 const { createPassiveLiveFeedMonitor } = require("./passive-live-feed");
 const {
+  clearLnnrankSavedVariablesApplicants,
   clearLnnrankSavedVariablesQueue,
   DEFAULT_WOW_ACCOUNT_ROOT,
   loadSavedVariablesSnapshot,
@@ -870,6 +871,20 @@ async function createDashboardServer(options = {}) {
 
         jsonResponse(response, 200, {
           ok: true,
+          state: snapshotState(),
+        });
+        return;
+      }
+
+      if (request.method === "POST" && requestUrl.pathname === "/api/lfg/clear") {
+        const savedVariables = pickLatestSavedVariablesFile(accountRoot);
+        const savedVariablesCleared = savedVariables
+          ? clearLnnrankSavedVariablesApplicants(savedVariables.path)
+          : { filePath: null, cleared: false, removed: 0 };
+
+        jsonResponse(response, 200, {
+          ok: true,
+          savedVariablesCleared,
           state: snapshotState(),
         });
         return;

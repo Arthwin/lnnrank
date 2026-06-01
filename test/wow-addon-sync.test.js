@@ -24,6 +24,7 @@ const {
 const { LookupQueue, buildLookupQueueKey } = require("../src/wow-addon-tools/lookup-queue");
 const { buildCompanionPayload } = require("../src/wow-addon-tools/lnnrank-bridge");
 const {
+  clearLnnrankSavedVariablesApplicantsText,
   clearLnnrankSavedVariablesRequestsText,
   parseLnnrankSavedVariables,
 } = require("../src/wow-addon-tools/saved-variables");
@@ -180,6 +181,42 @@ lnnrankDB = {
   assert.equal(cleared.requests.length, 0);
   assert.equal(cleared.groupMembers.length, 1);
   assert.equal(cleared.applicants.length, 1);
+});
+
+test("saved variables applicant clearing preserves queue snapshot data", () => {
+  const lua = `
+lnnrankDB = {
+  ["requests"] = {
+    ["us:stormrage:urmomgargles"] = {
+      ["region"] = "us",
+      ["realm"] = "Stormrage",
+      ["characterName"] = "Urmomgargles",
+      ["queuedAt"] = 1748650000,
+    },
+  },
+  ["groupMembers"] = {
+    ["us:stormrage:charby"] = {
+      ["region"] = "us",
+      ["realm"] = "Stormrage",
+      ["characterName"] = "Charby",
+      ["lastSeenAt"] = 1748650200,
+    },
+  },
+  ["applicants"] = {
+    ["us:stormrage:redsolo"] = {
+      ["region"] = "us",
+      ["realm"] = "Stormrage",
+      ["characterName"] = "Redsolo",
+      ["lastSeenAt"] = 1748650300,
+    },
+  },
+}
+`;
+
+  const cleared = parseLnnrankSavedVariables(clearLnnrankSavedVariablesApplicantsText(lua));
+  assert.equal(cleared.requests.length, 1);
+  assert.equal(cleared.groupMembers.length, 1);
+  assert.equal(cleared.applicants.length, 0);
 });
 
 test("cache returns fresh records only within 24 hours", () => {

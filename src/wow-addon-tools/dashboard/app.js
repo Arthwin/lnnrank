@@ -1335,6 +1335,19 @@ function requestClearResultsCache() {
   });
 }
 
+function requestClearLfgApplicants() {
+  openConfirmModal({
+    title: "Clear LFG applicants?",
+    message:
+      "This clears the persisted LFG applicant snapshot from the tab. Queue and cache data stay intact, and active live applicants may reappear.",
+    confirmLabel: "Clear LFG",
+    onConfirm: () => {
+      closeConfirmModal({ restoreFocus: false });
+      void clearLfgApplicants();
+    },
+  });
+}
+
 async function clearQueue() {
   const button = document.getElementById("clearQueueButton");
   if (button) {
@@ -1376,6 +1389,28 @@ async function clearResultsCache() {
     if (button) {
       button.disabled = false;
       button.textContent = "Clear Cache";
+    }
+  }
+}
+
+async function clearLfgApplicants() {
+  const button = document.getElementById("clearLfgButton");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Clearing...";
+  }
+
+  try {
+    await fetch("/api/lfg/clear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    await loadState();
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Clear LFG";
     }
   }
 }
@@ -1474,6 +1509,13 @@ function bindEvents() {
   if (clearResultsButton) {
     clearResultsButton.addEventListener("click", () => {
       requestClearResultsCache();
+    });
+  }
+
+  const clearLfgButton = document.getElementById("clearLfgButton");
+  if (clearLfgButton) {
+    clearLfgButton.addEventListener("click", () => {
+      requestClearLfgApplicants();
     });
   }
 

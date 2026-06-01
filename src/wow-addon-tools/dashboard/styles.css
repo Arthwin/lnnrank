@@ -307,6 +307,14 @@ th {
   margin: 0;
 }
 
+.lfg-card .card-head {
+  margin-bottom: 0.95rem;
+}
+
+.lfg-card .queue-card-head-top {
+  align-items: center;
+}
+
 .search-results-card,
 .search-layout > * {
   min-width: 0;

@@ -492,6 +492,21 @@ function clearLnnrankSavedVariablesRequestsText(text) {
   return replaceRequestsTableText(text, []);
 }
 
+function replaceApplicantsTableText(text, entries) {
+  const range = findTableBlockRange(text, "applicants");
+  if (!range) {
+    return text;
+  }
+
+  const before = text.slice(0, range.bodyStart + 1);
+  const after = text.slice(range.bodyEnd);
+  return `${before}${renderRequestsTableBody(entries)}${after}`;
+}
+
+function clearLnnrankSavedVariablesApplicantsText(text) {
+  return replaceApplicantsTableText(text, []);
+}
+
 function clearLnnrankSavedVariablesQueue(filePath) {
   const source = fs.readFileSync(filePath, "utf8");
   const parsed = parseLnnrankSavedVariables(source);
@@ -527,7 +542,27 @@ function removeLnnrankSavedVariablesQueueEntry(filePath, requestKey) {
   };
 }
 
+function clearLnnrankSavedVariablesApplicants(filePath) {
+  const source = fs.readFileSync(filePath, "utf8");
+  const parsed = parseLnnrankSavedVariables(source);
+  const clearedText = clearLnnrankSavedVariablesApplicantsText(source);
+  const removed = Array.isArray(parsed.applicants) ? parsed.applicants.length : 0;
+  const changed = clearedText !== source;
+
+  if (changed) {
+    fs.writeFileSync(filePath, clearedText, "utf8");
+  }
+
+  return {
+    filePath,
+    cleared: changed,
+    removed,
+  };
+}
+
 module.exports = {
+  clearLnnrankSavedVariablesApplicants,
+  clearLnnrankSavedVariablesApplicantsText,
   clearLnnrankSavedVariablesQueue,
   clearLnnrankSavedVariablesRequestsText,
   createEmptyParsedSavedVariables,
