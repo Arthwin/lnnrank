@@ -16,4 +16,4 @@ output/wow-addon-dashboard/*
 tmp/
 tmp-*/
 .cache/
-
+**/obj/
