@@ -32,6 +32,7 @@ const {
   buildUnifiedQueue,
   createDashboardServer,
 } = require("../src/wow-addon-tools/dashboard-server");
+const { extractPassiveLiveFeedEntries } = require("../src/wow-addon-tools/passive-live-feed");
 const {
   buildDevRuntimePaths,
   ensureDevRuntime,
@@ -498,6 +499,35 @@ test("sync request builder reuses the exact queue snapshot shown in the app", ()
     lastSeenAt: 1780203240,
     seenCount: 2,
   });
+});
+
+test("live feed extraction keeps unique relevant memory previews", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xABC",
+        encoding: "utf8",
+        previewUtf8: "lnnrankf24cf42579 hello there",
+        previewUtf16: "",
+      },
+      {
+        address: "0xDEF",
+        encoding: "utf16",
+        previewUtf8: "LNNRANK|ch=lnnrankf24cf42579|n=2|nm=Target",
+        previewUtf16: "LNNRANK|ch=lnnrankf24cf42579|n=2|nm=Target",
+      },
+      {
+        address: "0xFED",
+        encoding: "utf16",
+        previewUtf8: "nothing useful",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].kind, "channel");
+  assert.equal(entries[1].kind, "payload");
 });
 
 test("dev runtime bootstraps an isolated dashboard sandbox inside the chosen root", () => {

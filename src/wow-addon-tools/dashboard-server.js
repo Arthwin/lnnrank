@@ -33,6 +33,7 @@ const {
 } = require("./lnnrank-bridge");
 const { formatIsoTimestamp } = require("../mplus-matrix/utils");
 const { runAddonRequestSync } = require("./sync-service");
+const { createPassiveLiveFeedMonitor } = require("./passive-live-feed");
 const {
   clearLnnrankSavedVariablesQueue,
   DEFAULT_WOW_ACCOUNT_ROOT,
@@ -271,6 +272,7 @@ function buildDashboardState(options = {}) {
     groupMembers: enrichCharacters(savedVariables.parsed.groupMembers, cache),
     applicants: enrichCharacters(savedVariables.parsed.applicants, cache),
     passiveBridge: normalizePassiveBridge(savedVariables.parsed.passiveBridge),
+    passiveLiveFeed: options.passiveLiveFeedState || null,
     autoSync: options.autoSyncState || {
       isRunning: false,
       lastStartedAt: null,
@@ -371,6 +373,8 @@ async function createDashboardServer(options = {}) {
     scheduled: false,
     timer: null,
   };
+  const passiveLiveFeedMonitor =
+    options.enablePassiveLiveFeed === true ? createPassiveLiveFeedMonitor(options.passiveLiveFeedOptions) : null;
 
   function publishCompanionFromCache(cache) {
     const payload = buildCompanionPayload(listCachedRecords(cache), {
@@ -432,6 +436,7 @@ async function createDashboardServer(options = {}) {
       dbPath,
       accountRoot,
       autoSyncState: getAutoSyncState(),
+      passiveLiveFeedState: passiveLiveFeedMonitor ? passiveLiveFeedMonitor.snapshot() : null,
     });
   }
 
@@ -531,6 +536,9 @@ async function createDashboardServer(options = {}) {
         const state = snapshotState();
         if (state.meta.queueCount > 0) {
           scheduleAutoSync(100);
+        }
+        if (passiveLiveFeedMonitor && state.passiveBridge) {
+          void passiveLiveFeedMonitor.refresh(state.passiveBridge);
         }
         jsonResponse(response, 200, state);
         return;
@@ -686,6 +694,9 @@ async function createDashboardServer(options = {}) {
         if (state.meta.queueCount > 0) {
           scheduleAutoSync(100);
         }
+        if (passiveLiveFeedMonitor && state.passiveBridge) {
+          void passiveLiveFeedMonitor.refresh(state.passiveBridge);
+        }
       }, backgroundTickMs);
 
   server.on("close", () => {
@@ -708,6 +719,7 @@ async function main() {
     outputDir: process.env.WCL_DASHBOARD_OUTPUT_DIR || null,
     addonsDir: process.env.WCL_DASHBOARD_ADDONS_DIR || DEFAULT_WOW_ADDONS_DIR,
     provider: process.env.WCL_LOOKUP_PROVIDER || null,
+    enablePassiveLiveFeed: true,
   });
   server.listen(DEFAULT_PORT, "127.0.0.1", () => {
     process.stdout.write(`WCL dashboard listening on http://127.0.0.1:${DEFAULT_PORT}\n`);

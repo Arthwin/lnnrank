@@ -744,6 +744,7 @@ function renderPassive(data) {
   }
 
   const passive = data.passiveBridge;
+  const liveFeed = data.passiveLiveFeed;
   if (!passive) {
     target.innerHTML = `
       <section class="card">
@@ -769,6 +770,19 @@ function renderPassive(data) {
   const messageLog = Array.isArray(passive.messageLog) ? passive.messageLog : [];
   const playerLabel = [passive.playerName, passive.realm].filter(Boolean).join("-") || "Unknown";
   const regionLabel = passive.region ? String(passive.region).toUpperCase() : "Unknown";
+  const liveEntries = liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
+  const liveStatus =
+    !liveFeed || liveFeed.status === "idle"
+      ? "Idle"
+      : liveFeed.status === "ready"
+        ? "Watching"
+        : liveFeed.status === "scanning"
+          ? "Scanning"
+          : liveFeed.status === "waiting"
+            ? "Waiting"
+            : liveFeed.status === "unsupported"
+              ? "Unsupported"
+              : "Error";
 
   target.innerHTML = `
     <section class="card">
@@ -780,12 +794,52 @@ function renderPassive(data) {
         ${createSummaryItem("Status", statusLabel)}
         ${createSummaryItem("Sequence", formatCompactNumber(passive.sequence ?? 0, 0))}
         ${createSummaryItem("Messages", formatCompactNumber(passive.messageCount ?? messageLog.length, 0))}
+        ${createSummaryItem("Live Feed", liveStatus)}
         ${createSummaryItem(
           "Last Publish",
           passive.lastPublishedAtIso ? formatDate(passive.lastPublishedAtIso) : "None yet"
         )}
         ${createSummaryItem("SavedVariables", lastSavedVariablesFlush)}
       </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Live Channel Feed</h2>
+        <p>This watches the active WoW process directly, so new channel traces can appear here without another /reload.</p>
+      </div>
+      <div class="detail-list">
+        ${createDetailRow("Status", liveStatus)}
+        ${createDetailRow("WoW PID", liveFeed && liveFeed.wowProcessId != null ? String(liveFeed.wowProcessId) : "Unknown", { code: true })}
+        ${createDetailRow("Last Scan", liveFeed && liveFeed.lastScannedAt ? formatDate(liveFeed.lastScannedAt) : "Never")}
+        ${createDetailRow("Scan Time", liveFeed && liveFeed.scanDurationMs != null ? `${formatCompactNumber(liveFeed.scanDurationMs, 0)} ms` : "Unknown")}
+        ${createDetailRow("Scan Error", liveFeed && liveFeed.lastError ? liveFeed.lastError : "None")}
+      </div>
+      ${
+        liveEntries.length
+          ? `<div class="message-log">
+              ${liveEntries
+                .map(
+                  (entry) => `
+                    <article class="message-log-row">
+                      <div class="message-log-meta">
+                        <span>${escapeHtml(entry.lastSeenAt ? formatDate(entry.lastSeenAt) : "Unknown time")}</span>
+                        <span>${escapeHtml(entry.kind || "memory-hit")}</span>
+                        <span>${escapeHtml(entry.encoding || "unknown")}</span>
+                        <span>${escapeHtml(entry.address || "unknown")}</span>
+                      </div>
+                      <pre class="code-block message-log-payload">${escapeHtml(entry.preview || "")}</pre>
+                    </article>
+                  `
+                )
+                .join("")}
+            </div>`
+          : createEmpty(
+              liveFeed && liveFeed.lastError
+                ? "The live scanner ran into an error. See Scan Error above."
+                : "No live channel traces have been observed yet."
+            )
+      }
     </section>
 
     <div class="queue-layout passive-layout">
