@@ -322,6 +322,11 @@ function normalizePassiveDiscoveryToken(value) {
 function buildPassiveDiscoveryPattern(passiveBridge) {
   const channelName = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.channelName);
   const playerKey = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.playerKey);
+  const sessionId = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.sessionId);
+
+  if (channelName && sessionId) {
+    return `LNNRANK|ch=${channelName}|ss=${sessionId}`;
+  }
 
   if (channelName && playerKey && channelName.includes(playerKey)) {
     return `LNNRANK|ch=${channelName}`;
@@ -353,6 +358,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
     supported: process.platform === "win32",
     status: "idle",
     channelName: null,
+    sessionId: null,
     discoveryPattern: null,
     wowProcessId: null,
     lastScannedAt: null,
@@ -368,6 +374,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
 
   function resetForChannel(channelName) {
     state.channelName = channelName || null;
+    state.sessionId = null;
     state.discoveryPattern = null;
     state.wowProcessId = null;
     state.lastScannedAt = null;
@@ -444,6 +451,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
       supported: state.supported,
       status: state.status,
       channelName: state.channelName,
+      sessionId: state.sessionId,
       discoveryPattern: state.discoveryPattern,
       wowProcessId: state.wowProcessId,
       lastScannedAt: state.lastScannedAt,
@@ -462,6 +470,8 @@ function createPassiveLiveFeedMonitor(options = {}) {
       passiveBridge && passiveBridge.enabled && passiveBridge.channelName
         ? String(passiveBridge.channelName).trim()
         : "";
+    const sessionId =
+      passiveBridge && passiveBridge.enabled && passiveBridge.sessionId ? String(passiveBridge.sessionId).trim() : "";
     const discoveryPattern =
       passiveBridge && passiveBridge.enabled ? buildPassiveDiscoveryPattern(passiveBridge) : null;
 
@@ -477,6 +487,11 @@ function createPassiveLiveFeedMonitor(options = {}) {
 
     if (state.channelName !== channelName || state.discoveryPattern !== discoveryPattern) {
       resetForChannel(channelName);
+      state.sessionId = sessionId || null;
+      state.discoveryPattern = discoveryPattern;
+    } else if ((state.sessionId || "") !== sessionId) {
+      resetForChannel(channelName);
+      state.sessionId = sessionId || null;
       state.discoveryPattern = discoveryPattern;
     }
 

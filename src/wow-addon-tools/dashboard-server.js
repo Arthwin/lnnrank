@@ -783,6 +783,8 @@ async function createDashboardServer(options = {}) {
     passiveBrokerRuntime.lastEventSequence = 0;
     passiveBrokerRuntime.lastEventAtMs = 0;
     passiveBrokerRuntime.pendingEvents = [];
+    passiveBrokerRuntime.events = [];
+    clearPassiveQueueRuntime();
   }
 
   function buildPassiveLogEvent(entry) {

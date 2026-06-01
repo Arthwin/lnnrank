@@ -629,6 +629,15 @@ test("live feed discovery pattern follows the active player channel across reloa
     }),
     "LNNRANK|ch=lnnrank0ff24cf4"
   );
+
+  assert.equal(
+    buildPassiveDiscoveryPattern({
+      channelName: "lnnrank0ff24cf4",
+      playerKey: "0ff24cf4",
+      sessionId: "f24cf47371",
+    }),
+    "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf47371"
+  );
 });
 
 test("live feed extraction accepts payloads with an empty passive session id", () => {
