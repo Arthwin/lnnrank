@@ -6,6 +6,7 @@ end
 
 local PAYLOAD_PREFIX = "LNNRANK"
 local EVENT_BATCH_LIMIT = 300
+local MAX_PASSIVE_PAYLOAD_LENGTH = 230
 
 local function sanitizeSegment(value, maxLength)
     local text = tostring(value or "")
@@ -121,7 +122,10 @@ local function buildLfgStatusEvent(region, heartbeatId, batchIndex, batchTotal, 
     event.heartbeatId = heartbeatId
     event.batchIndex = batchIndex
     event.batchTotal = batchTotal
-    if type(member) == "table" then
+    if type(member) == "table" and type(member[1]) == "table" then
+        event.members = member
+    elseif type(member) == "table" then
+        event.members = {member}
         event.groupID = member.groupID
         event.realm = member.realm
         event.characterName = member.characterName
@@ -132,6 +136,32 @@ local function buildLfgStatusEvent(region, heartbeatId, batchIndex, batchTotal, 
         event.level = member.level
     end
     return event
+end
+
+local function buildHeartbeatMemberToken(member)
+    if type(member) ~= "table" or not member.characterName or not member.realm then
+        return nil
+    end
+
+    return table.concat({
+        sanitizeSegment(member.characterName, 32),
+        sanitizeSegment(member.realm, 32),
+        "g" .. sanitizeSegment(member.groupID or 0, 10),
+        sanitizeSegment(member.memberIndex or 0, 3),
+    }, "~")
+end
+
+local function cloneArray(values)
+    local result = {}
+    if type(values) ~= "table" then
+        return result
+    end
+
+    for index = 1, #values do
+        result[index] = values[index]
+    end
+
+    return result
 end
 
 local function encodeEventPayload(event)
@@ -155,11 +185,20 @@ local function encodeEventPayload(event)
         table.insert(segments, "hb=" .. sanitizeSegment(event.heartbeatId, 24))
         table.insert(segments, "ix=" .. tostring(event.batchIndex or 0))
         table.insert(segments, "tt=" .. tostring(event.batchTotal or 0))
-        if event.realm then
+        if type(event.members) == "table" and #event.members > 0 then
+            local memberTokens = {}
+            for index = 1, #event.members do
+                local token = buildHeartbeatMemberToken(event.members[index])
+                if token and token ~= "" then
+                    table.insert(memberTokens, token)
+                end
+            end
+            table.insert(segments, "m=" .. (#memberTokens > 0 and table.concat(memberTokens, ",") or "_"))
+        elseif event.realm then
             table.insert(segments, "re=" .. sanitizeSegment(event.realm, 32))
-        end
-        if event.characterName then
-            table.insert(segments, "nm=" .. sanitizeSegment(event.characterName, 32))
+            if event.characterName then
+                table.insert(segments, "nm=" .. sanitizeSegment(event.characterName, 32))
+            end
         end
     end
 
@@ -246,6 +285,9 @@ local function publishEvent(event)
     end
 
     local payload = encodeEventPayload(event)
+    if #payload > MAX_PASSIVE_PAYLOAD_LENGTH then
+        return false
+    end
     appendSavedBatchEvent(event, payload)
     if type(addon.PublishPassivePayload) == "function" and type(addon.IsPassiveChannelEnabled) == "function" and
         addon.IsPassiveChannelEnabled() then
@@ -293,18 +335,36 @@ function addon.PublishLfgStatusSnapshot(region, members)
 
     local memberEntries = type(members) == "table" and members or {}
     local heartbeatId = tostring(getNowUnixMs())
-    local totalMembers = #memberEntries
 
     if addon.IsSavedEventBatchEnabled() then
         clearSavedLfgStatusEvents()
     end
 
-    if totalMembers <= 0 then
+    if #memberEntries <= 0 then
         return publishEvent(buildLfgStatusEvent(region, heartbeatId, 0, 0, nil))
     end
 
-    for index = 1, totalMembers do
-        publishEvent(buildLfgStatusEvent(region, heartbeatId, index, totalMembers, memberEntries[index]))
+    local chunks = {}
+    local currentChunk = {}
+    for index = 1, #memberEntries do
+        local candidateChunk = cloneArray(currentChunk)
+        table.insert(candidateChunk, memberEntries[index])
+        local candidateEvent = buildLfgStatusEvent(region, heartbeatId, 1, 1, candidateChunk)
+        local candidatePayload = encodeEventPayload(candidateEvent)
+        if #candidatePayload > MAX_PASSIVE_PAYLOAD_LENGTH and #currentChunk > 0 then
+            table.insert(chunks, currentChunk)
+            currentChunk = {memberEntries[index]}
+        else
+            currentChunk = candidateChunk
+        end
+    end
+
+    if #currentChunk > 0 then
+        table.insert(chunks, currentChunk)
+    end
+
+    for index = 1, #chunks do
+        publishEvent(buildLfgStatusEvent(region, heartbeatId, index, #chunks, chunks[index]))
     end
 
     return true

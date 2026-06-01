@@ -1490,16 +1490,18 @@ async function createDashboardServer(options = {}) {
         if (!member || !member.characterName || !member.realm) {
           continue;
         }
+        const resolvedGroupId = member.groupID != null ? member.groupID : event.groupID != null ? event.groupID : null;
         const groupKey =
-          event.groupID != null
-            ? String(event.groupID)
+          resolvedGroupId != null
+            ? String(resolvedGroupId)
             : `solo:${member.characterName}:${member.realm}:${member.memberIndex || 0}`;
         const group = batch.groups.get(groupKey) || {
-          groupID: event.groupID != null ? event.groupID : null,
+          groupID: resolvedGroupId,
           capturedAtMs: batch.capturedAtMs,
           members: [],
         };
         group.capturedAtMs = batch.capturedAtMs;
+        group.groupID = resolvedGroupId;
         const memberKey = `${member.characterName}:${member.realm}:${member.memberIndex || 0}`;
         const withoutExisting = group.members.filter(
           (existingMember) =>
@@ -1511,7 +1513,7 @@ async function createDashboardServer(options = {}) {
             region: event.region || "us",
             realm: member.realm,
             characterName: member.characterName,
-            groupID: event.groupID != null ? event.groupID : null,
+            groupID: resolvedGroupId,
             memberIndex: member.memberIndex != null ? member.memberIndex : event.memberIndex || null,
             class: member.class || event.class || null,
             assignedRole: member.assignedRole || event.assignedRole || null,

@@ -61,7 +61,7 @@ const PAYLOAD_FIELD_PATTERNS = {
   cl: /^[A-Za-z0-9_:=.-]{1,16}/u,
   il: /^\d{1,4}(?:\.\d{1,2})?/u,
   lv: /^\d{1,3}/u,
-  m: /^(?:_|[A-Za-z0-9_:=.,~-]{1,180})/u,
+  m: /^(?:_|[A-Za-z0-9_:=.,~-]{1,512})/u,
 };
 
 function extractCanonicalPayload(text) {
@@ -106,19 +106,37 @@ function extractPayloadTimestampMs(payload) {
 }
 
 function parseLfgHeartbeatMemberToken(token) {
-  const [characterName = "", realm = "", memberIndex = "", className = "", assignedRole = ""] = String(
-    token || ""
-  ).split("~", 5);
+  const [characterName = "", realm = "", third = "", fourth = "", fifth = "", sixth = ""] = String(token || "").split(
+    "~",
+    6
+  );
   if (!characterName || !realm) {
     return null;
+  }
+
+  let groupID = null;
+  let memberIndex = null;
+  let className = null;
+  let assignedRole = null;
+
+  if (third.startsWith("g")) {
+    groupID = parseIntegerField(third.slice(1));
+    memberIndex = parseIntegerField(fourth);
+    className = fifth || null;
+    assignedRole = sixth || null;
+  } else {
+    memberIndex = parseIntegerField(third);
+    className = fourth || null;
+    assignedRole = fifth || null;
   }
 
   return {
     characterName,
     realm,
-    memberIndex: parseIntegerField(memberIndex),
-    class: className || null,
-    assignedRole: assignedRole || null,
+    groupID,
+    memberIndex,
+    class: className,
+    assignedRole,
   };
 }
 

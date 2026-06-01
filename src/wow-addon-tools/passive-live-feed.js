@@ -180,28 +180,65 @@ function extractPassiveLiveFeedEntries(scanResult) {
 
   for (const match of matches) {
     for (const preview of [match.previewUtf8, match.previewUtf16]) {
-      const normalized = normalizePassivePreview(preview);
-      if (!normalized) {
-        continue;
-      }
+      for (const normalized of extractPassivePreviewEntries(preview)) {
+        const key = normalized.preview;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
 
-      const key = normalized.preview;
-      if (seen.has(key)) {
-        continue;
+        entries.push({
+          key,
+          address: match.address,
+          encoding: match.encoding,
+          kind: normalized.kind,
+          preview: normalized.preview,
+        });
       }
-      seen.add(key);
-
-      entries.push({
-        key,
-        address: match.address,
-        encoding: match.encoding,
-        kind: normalized.kind,
-        preview: normalized.preview,
-      });
     }
   }
 
   return entries;
+}
+
+function extractCanonicalPayloads(preview) {
+  const raw = String(preview || "");
+  const payloads = [];
+  const seen = new Set();
+  let offset = 0;
+
+  while (offset < raw.length) {
+    const startIndex = raw.indexOf("LNNRANK|", offset);
+    if (startIndex < 0) {
+      break;
+    }
+
+    const nextStartIndex = raw.indexOf("LNNRANK|", startIndex + "LNNRANK|".length);
+    const payload = extractCanonicalPayload(
+      nextStartIndex >= 0 ? raw.slice(startIndex, nextStartIndex) : raw.slice(startIndex)
+    );
+    if (payload && !seen.has(payload)) {
+      seen.add(payload);
+      payloads.push(payload);
+    }
+
+    offset = startIndex + "LNNRANK|".length;
+  }
+
+  return payloads;
+}
+
+function extractPassivePreviewEntries(preview) {
+  const payloads = extractCanonicalPayloads(preview);
+  if (payloads.length > 0) {
+    return payloads.map((payload) => ({
+      kind: "payload",
+      preview: payload,
+    }));
+  }
+
+  const normalized = normalizePassivePreview(preview);
+  return normalized ? [normalized] : [];
 }
 
 function trimAtNoiseBoundary(text) {
@@ -359,19 +396,15 @@ function buildPassiveDiscoveryPattern(passiveBridge) {
   const channelName = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.channelName);
   const playerKey = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.playerKey);
 
-  if (channelName && playerKey && channelName.includes(playerKey)) {
-    return `LNNRANK|ch=${channelName}`;
+  if (channelName) {
+    return `ch=${channelName}`;
   }
 
   if (playerKey.length >= 6) {
-    return `LNNRANK|ch=lnnrank${playerKey}`;
+    return `ch=lnnrank${playerKey}`;
   }
 
-  if (channelName.startsWith("lnnrank") && channelName.length > "lnnrank".length + 4) {
-    return `LNNRANK|ch=${channelName}`;
-  }
-
-  return channelName ? `LNNRANK|ch=${channelName}` : null;
+  return null;
 }
 
 function createPassiveLiveFeedMonitor(options = {}) {

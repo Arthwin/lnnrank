@@ -39,6 +39,7 @@ const {
   extractPassiveLiveFeedEntries,
   selectPassiveAddressCandidates,
 } = require("../src/wow-addon-tools/passive-live-feed");
+const { parseAddonEventPayload } = require("../src/wow-addon-tools/addon-event-format");
 const {
   buildDevRuntimePaths,
   ensureDevRuntime,
@@ -614,13 +615,36 @@ test("live feed extraction preserves applicant metadata in canonical payloads", 
   );
 });
 
+test("live feed extraction keeps multiple canonical payloads from one memory window", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xC0DE",
+        encoding: "window",
+        previewUtf8:
+          "noise....LNNRANK|v=2|e=search|id=s1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=101|t=1780336000001|rg=us|sr=unit|re=Stormrage|nm=Clickedone !! LNNRANK|v=2|e=search|id=s2|ch=lnnrank0ff24cf4|ss=f24cf44941|n=102|t=1780336000002|rg=us|sr=applicant|re=Thrall|nm=Queuedtwo|gi=2|mi=1",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 2);
+  assert.deepEqual(
+    entries.map((entry) => entry.preview),
+    [
+      "LNNRANK|v=2|e=search|id=s1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=101|t=1780336000001|rg=us|sr=unit|re=Stormrage|nm=Clickedone",
+      "LNNRANK|v=2|e=search|id=s2|ch=lnnrank0ff24cf4|ss=f24cf44941|n=102|t=1780336000002|rg=us|sr=applicant|re=Thrall|nm=Queuedtwo|gi=2|mi=1",
+    ]
+  );
+});
+
 test("live feed discovery pattern follows the active player channel across reload sessions", () => {
   assert.equal(
     buildPassiveDiscoveryPattern({
       channelName: "lnnrankf24cf42583",
       playerKey: "0ff24cf4",
     }),
-    "LNNRANK|ch=lnnrank0ff24cf4"
+    "ch=lnnrankf24cf42583"
   );
 
   assert.equal(
@@ -628,7 +652,7 @@ test("live feed discovery pattern follows the active player channel across reloa
       channelName: "lnnrank0ff24cf4",
       playerKey: "0ff24cf4",
     }),
-    "LNNRANK|ch=lnnrank0ff24cf4"
+    "ch=lnnrank0ff24cf4"
   );
 
   assert.equal(
@@ -636,8 +660,33 @@ test("live feed discovery pattern follows the active player channel across reloa
       channelName: "lnnrank0ff24cf4",
       playerKey: "0ff24cf4",
     }),
-    "LNNRANK|ch=lnnrank0ff24cf4"
+    "ch=lnnrank0ff24cf4"
   );
+});
+
+test("addon event parser understands grouped LFG heartbeat member tokens", () => {
+  const event = parseAddonEventPayload(
+    "LNNRANK|v=2|e=lfg_status|id=hb-1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=812|t=1780336000123|rg=us|sr=lfg-status|hb=1780336000123|ix=1|tt=1|m=Clickedone~Stormrage~g11~1,Queuedtwo~Thrall~g12~2"
+  );
+
+  assert.equal(event.eventType, "lfg_status");
+  assert.equal(event.members.length, 2);
+  assert.deepEqual(event.members[0], {
+    characterName: "Clickedone",
+    realm: "Stormrage",
+    groupID: 11,
+    memberIndex: 1,
+    class: null,
+    assignedRole: null,
+  });
+  assert.deepEqual(event.members[1], {
+    characterName: "Queuedtwo",
+    realm: "Thrall",
+    groupID: 12,
+    memberIndex: 2,
+    class: null,
+    assignedRole: null,
+  });
 });
 
 test("live feed extraction accepts payloads with an empty passive session id", () => {
@@ -1759,6 +1808,89 @@ test("dashboard broker does not redeliver identical passive events across snapsh
     assert.equal(firstSnapshot.passiveLiveFeed.events.length, 1);
     assert.equal(secondSnapshot.passiveLiveFeed.events.length, 1);
     assert.equal(secondSnapshot.passiveLiveFeed.events[0].preview, firstSnapshot.passiveLiveFeed.events[0].preview);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("dashboard applies grouped LFG heartbeat batches from passive live events", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-lfg-heartbeat-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const eventTimestampMs = Date.now();
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44941",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    events: [
+      {
+        key: "event-lfg-heartbeat-1",
+        kind: "payload",
+        preview: `LNNRANK|v=2|e=lfg_status|id=hb-1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=812|t=${eventTimestampMs}|rg=us|sr=lfg-status|hb=${eventTimestampMs}|ix=1|tt=1|m=Clickedone~Stormrage~g11~1,Queuedtwo~Thrall~g12~1`,
+        eventAt: new Date(eventTimestampMs).toISOString(),
+      },
+    ],
+  };
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+    testHooks,
+  });
+
+  try {
+    const snapshot = testHooks.snapshotState();
+    assert.equal(snapshot.applicants.length, 2);
+    assert.deepEqual(
+      snapshot.applicants.map((entry) => `${entry.characterName}-${entry.realm}:${entry.groupID}`),
+      ["Clickedone-Stormrage:11", "Queuedtwo-Thrall:12"]
+    );
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {
