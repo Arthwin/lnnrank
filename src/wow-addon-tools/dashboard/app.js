@@ -1,6 +1,7 @@
 const TAB_IDS = new Set(["search", "lfg", "live"]);
 const VIEW_STATE_STORAGE_KEY = "lnnrank-dashboard-view";
 const RESULTS_PAGE_SIZE = 20;
+const LIVE_LOG_PAGE_SIZE = 12;
 const SOURCE_LABELS = {
   manual: "Manual search",
   unit: "Ctrl-click unit frame",
@@ -62,6 +63,8 @@ const state = {
   resultsPage: 1,
   resultSort: "updatedAt",
   resultSortDirection: "desc",
+  liveLogPage: 1,
+  liveLogHiddenIds: [],
 };
 
 let confirmModalAction = null;
@@ -564,12 +567,15 @@ function loadPersistedViewState() {
     useExplicitSearchParams && params.has("sort") ? normalizeSortColumn(params.get("sort")) : "updatedAt";
   const resultSortDirection =
     useExplicitSearchParams && params.has("dir") ? normalizeSortDirection(params.get("dir")) : "desc";
+  const liveLogPage = parsePositiveInt(saved.liveLogPage, 1);
 
   state.activeTab = activeTab;
   state.resultSearch = resultSearch;
   state.resultsPage = resultsPage;
   state.resultSort = resultSort;
   state.resultSortDirection = resultSortDirection;
+  state.liveLogPage = liveLogPage;
+  state.liveLogHiddenIds = [];
 }
 
 function persistViewState() {
@@ -579,6 +585,7 @@ function persistViewState() {
     resultsPage: state.resultsPage,
     resultSort: state.resultSort,
     resultSortDirection: state.resultSortDirection,
+    liveLogPage: state.liveLogPage,
   };
 
   try {
@@ -909,6 +916,10 @@ function createPassiveStatChip(label, value, options = {}) {
   `;
 }
 
+function getHiddenLiveLogIds() {
+  return new Set(state.liveLogHiddenIds);
+}
+
 function buildPassiveLogEntries(passive, liveFeed) {
   const merged = new Map();
   const liveEntries = liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
@@ -946,7 +957,7 @@ function buildPassiveLogEntries(passive, liveFeed) {
 
     upsertEntry(`payload:${entry.preview}`, {
       id: `payload:${entry.preview}`,
-      sortAt: entry.lastSeenAt || entry.firstSeenAt || null,
+      sortAt: entry.firstSeenAt || entry.lastSeenAt || null,
       title: [parsed.characterName, parsed.realm].filter(Boolean).join("-") || "Unknown character",
       source: formatSourceLabel(parsed.source),
       sequence: parsed.sequence,
@@ -980,6 +991,19 @@ function buildPassiveLogEntries(passive, liveFeed) {
   );
 }
 
+function createLiveLogFooterMarkup(visibleCount, totalCount, currentPage, totalPages) {
+  const countLabel =
+    visibleCount !== totalCount
+      ? `${formatCompactNumber(visibleCount, 0)} of ${formatCompactNumber(totalCount, 0)} log entries`
+      : `${formatCompactNumber(totalCount, 0)} log entries`;
+  const pagerMarkup = totalPages > 1 ? createPagerMarkup("live", currentPage, totalPages) : "";
+
+  return `
+    <span class="results-footer-count">${escapeHtml(countLabel)}</span>
+    ${pagerMarkup}
+  `;
+}
+
 function renderPassive(data) {
   const target = document.getElementById("passiveView");
   if (!target) {
@@ -1003,7 +1027,12 @@ function renderPassive(data) {
   const playerLabel = [passive.playerName, passive.realm].filter(Boolean).join("-") || "Unknown";
   const regionLabel = passive.region ? String(passive.region).toUpperCase() : "Unknown";
   const liveStatus = formatPassiveLiveStatus(liveFeed);
-  const logEntries = buildPassiveLogEntries(passive, liveFeed);
+  const allLogEntries = buildPassiveLogEntries(passive, liveFeed);
+  const hiddenIds = getHiddenLiveLogIds();
+  const logEntries = allLogEntries.filter((entry) => !hiddenIds.has(entry.id));
+  const pagedLogEntries = paginateItems(logEntries, state.liveLogPage, LIVE_LOG_PAGE_SIZE);
+  state.liveLogPage = pagedLogEntries.page;
+  persistViewState();
   const statsMarkup = [
     createPassiveStatChip("Live", liveStatus),
     createPassiveStatChip("Channel", passive.channelName || "Unknown", { code: true }),
@@ -1027,7 +1056,11 @@ function renderPassive(data) {
           <p>${escapeHtml(playerLabel)} <span class="passive-head-sep">·</span> ${escapeHtml(regionLabel)}</p>
         </div>
         <div class="passive-inline-note">
-          ${escapeHtml(liveFeed && liveFeed.lastError ? liveFeed.lastError : `${logEntries.length} log entr${logEntries.length === 1 ? "y" : "ies"}`)}
+          ${escapeHtml(
+            liveFeed && liveFeed.lastError
+              ? liveFeed.lastError
+              : `${logEntries.length} visible log entr${logEntries.length === 1 ? "y" : "ies"}`
+          )}
         </div>
       </div>
       <div class="passive-stat-grid">
@@ -1037,13 +1070,23 @@ function renderPassive(data) {
 
     <section class="card passive-log-card">
       <div class="passive-log-head">
-        <h2>Relay Log</h2>
-        <p>Clean outbound payloads from the addon, merged from live memory and saved snapshots.</p>
+        <div>
+          <h2>Relay Log</h2>
+          <p>Clean outbound payloads from the addon, merged from live memory and saved snapshots.</p>
+        </div>
+        <button
+          class="danger compact-toolbar-button"
+          type="button"
+          data-clear-live-log
+          ${allLogEntries.length === 0 ? "disabled" : ""}
+        >
+          Clear Log
+        </button>
       </div>
       ${
-        logEntries.length
+        pagedLogEntries.items.length
           ? `<div class="passive-log-list">
-              ${logEntries
+              ${pagedLogEntries.items
                 .map(
                   (entry) => `
                     <article class="passive-log-row">
@@ -1063,11 +1106,16 @@ function renderPassive(data) {
                 .join("")}
             </div>`
           : createEmpty(
-              liveFeed && liveFeed.lastError
+              logEntries.length === 0 && allLogEntries.length > 0
+                ? "Live log cleared. New relay payloads will appear here."
+                : liveFeed && liveFeed.lastError
                 ? "The live scanner hit an error, so there are no clean payloads to show yet."
                 : "No relay payloads have been captured yet."
             )
       }
+      <div class="results-footer pager passive-log-footer">
+        ${createLiveLogFooterMarkup(logEntries.length, allLogEntries.length, pagedLogEntries.page, pagedLogEntries.totalPages)}
+      </div>
     </section>
   `;
 }
@@ -1406,6 +1454,23 @@ async function clearLfgApplicants() {
   }
 }
 
+function clearLiveLog() {
+  if (!state.data) {
+    return;
+  }
+
+  const entries = buildPassiveLogEntries(state.data.passiveBridge, state.data.passiveLiveFeed);
+  if (!entries.length) {
+    return;
+  }
+
+  const mergedIds = new Set([...state.liveLogHiddenIds, ...entries.map((entry) => entry.id)]);
+  state.liveLogHiddenIds = [...mergedIds].slice(-400);
+  state.liveLogPage = 1;
+  persistViewState();
+  renderAll();
+}
+
 function bindTabs() {
   document.getElementById("tabs").addEventListener("click", (event) => {
     const tab = event.target.closest("[data-tab]");
@@ -1466,6 +1531,8 @@ function bindPagination() {
     const action = pagerButton.dataset.pageAction;
     if (target === "results") {
       state.resultsPage = Math.max(1, state.resultsPage + (action === "next" ? 1 : -1));
+    } else if (target === "live") {
+      state.liveLogPage = Math.max(1, state.liveLogPage + (action === "next" ? 1 : -1));
     }
     persistViewState();
     renderAll();
@@ -1538,6 +1605,12 @@ function bindEvents() {
     const confirmDismissTarget = clickTarget.closest("[data-confirm-dismiss]");
     if (confirmDismissTarget) {
       closeConfirmModal();
+      return;
+    }
+
+    const clearLiveLogButton = clickTarget.closest("[data-clear-live-log]");
+    if (clearLiveLogButton) {
+      clearLiveLog();
       return;
     }
 

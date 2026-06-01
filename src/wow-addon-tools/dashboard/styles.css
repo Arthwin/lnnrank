@@ -919,6 +919,10 @@ code {
   margin-bottom: 0.9rem;
 }
 
+.passive-log-head > div {
+  min-width: 0;
+}
+
 .passive-log-head h2 {
   margin: 0 0 0.2rem;
 }
@@ -969,6 +973,10 @@ code {
   border-radius: 14px;
   font-size: 0.82rem;
   line-height: 1.42;
+}
+
+.passive-log-footer {
+  margin-top: 1rem;
 }
 
 .passive-layout {
