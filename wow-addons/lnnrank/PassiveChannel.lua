@@ -130,6 +130,20 @@ local function getPassiveChannelNumber(channelName)
     return nil
 end
 
+local function leaveStalePassiveChannels(activeChannelName)
+    if type(GetChannelList) ~= "function" or type(LeaveChannelByName) ~= "function" then
+        return
+    end
+
+    local channelList = {GetChannelList()}
+    for index = 1, #channelList, 3 do
+        local channelName = channelList[index + 1]
+        if type(channelName) == "string" and channelName:match("^lnnrank") and channelName ~= activeChannelName then
+            pcall(LeaveChannelByName, channelName)
+        end
+    end
+end
+
 local function ensurePassiveChannel()
     if not addon.IsPassiveChannelEnabled() then
         return nil
@@ -140,6 +154,8 @@ local function ensurePassiveChannel()
     if not passiveChannelName then
         passiveChannelName = buildPassiveChannelName()
     end
+
+    leaveStalePassiveChannels(passiveChannelName)
 
     local channelNumber = getPassiveChannelNumber(passiveChannelName)
     if channelNumber then
@@ -156,6 +172,7 @@ local function ensurePassiveChannel()
 
     channelNumber = getPassiveChannelNumber(passiveChannelName)
     if channelNumber then
+        leaveStalePassiveChannels(passiveChannelName)
         hideChannelEverywhere(passiveChannelName)
         return channelNumber
     end
@@ -294,6 +311,7 @@ function addon.SetPassiveChannelEnabled(enabled)
     if passiveChannelName and type(LeaveChannelByName) == "function" then
         pcall(LeaveChannelByName, passiveChannelName)
     end
+    leaveStalePassiveChannels(nil)
     syncPassiveBridgeState()
 end
 
@@ -337,6 +355,7 @@ end
 
 local passiveFrame = CreateFrame("Frame")
 passiveFrame:RegisterEvent("PLAYER_LOGIN")
+passiveFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 passiveFrame:RegisterEvent("CHANNEL_UI_UPDATE")
 passiveFrame:SetScript("OnEvent", function(_, event)
     if event == "CHANNEL_UI_UPDATE" and passiveChannelName then
@@ -348,6 +367,14 @@ passiveFrame:SetScript("OnEvent", function(_, event)
     ensureFiltersInstalled()
     if addon.IsPassiveChannelEnabled() then
         ensurePassiveChannel()
+        if event == "PLAYER_ENTERING_WORLD" and type(C_Timer) == "table" and type(C_Timer.After) == "function" then
+            C_Timer.After(1, function()
+                if addon.IsPassiveChannelEnabled() then
+                    ensurePassiveChannel()
+                    syncPassiveBridgeState()
+                end
+            end)
+        end
     end
     syncPassiveBridgeState()
 end)
