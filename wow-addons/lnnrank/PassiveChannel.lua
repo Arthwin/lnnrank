@@ -65,6 +65,14 @@ local function buildPassivePlayerKey()
     return passivePlayerKey
 end
 
+local function ensurePassiveSessionId()
+    if not passiveSessionId then
+        passiveSessionId = buildPassiveSessionId()
+    end
+
+    return passiveSessionId
+end
+
 local function buildPassiveChannelName()
     return string.format("lnnrank%s", buildPassivePlayerKey()):sub(1, 30)
 end
@@ -241,7 +249,7 @@ local function syncPassiveBridgeState()
     bridge.playerName = type(UnitName) == "function" and UnitName("player") or nil
     bridge.realm = type(GetRealmName) == "function" and GetRealmName() or nil
     bridge.region = type(addon.GetCurrentRegionSlug) == "function" and addon.GetCurrentRegionSlug() or "us"
-    bridge.sessionId = passiveSessionId or buildPassiveSessionId()
+    bridge.sessionId = ensurePassiveSessionId()
     bridge.sequence = publishSequence
     bridge.lastPublishedAt = lastPublishedAt
     bridge.lastPublishedPayload = lastPublishedPayload
@@ -258,7 +266,7 @@ local function buildPayload(request)
     local segments = {
         PAYLOAD_PREFIX:sub(1, #PAYLOAD_PREFIX - 1),
         "ch=" .. sanitizeSegment(passiveChannelName or "", 30),
-        "ss=" .. sanitizeSegment(passiveSessionId or "", 20),
+        "ss=" .. sanitizeSegment(ensurePassiveSessionId(), 20),
         "n=" .. tostring(publishSequence),
         "rg=" .. sanitizeSegment(request.region, 8),
         "re=" .. sanitizeSegment(request.realm, 32),
@@ -326,7 +334,7 @@ function addon.GetPassiveChannelDebugState()
         lastPublishedPayload = lastPublishedPayload,
         playerKey = buildPassivePlayerKey(),
         sequence = publishSequence,
-        sessionId = passiveSessionId or buildPassiveSessionId(),
+        sessionId = ensurePassiveSessionId(),
     }
 end
 

@@ -582,7 +582,7 @@ test("live feed discovery pattern follows the active player channel across reloa
       channelName: "lnnrankf24cf42583",
       playerKey: "0ff24cf4",
     }),
-    "lnnrankf24cf4"
+    "LNNRANK|ch=lnnrank0ff24cf4"
   );
 
   assert.equal(
@@ -590,7 +590,27 @@ test("live feed discovery pattern follows the active player channel across reloa
       channelName: "lnnrank0ff24cf4",
       playerKey: "0ff24cf4",
     }),
-    "lnnrank0ff24cf4"
+    "LNNRANK|ch=lnnrank0ff24cf4"
+  );
+});
+
+test("live feed extraction accepts payloads with an empty passive session id", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xABCD",
+        encoding: "window",
+        previewUtf8:
+          "noise....LNNRANK|ch=lnnrank0ff24cf4|ss=|n=75|rg=us|re=Stormrage|nm=Tskihi|sr=applicant|ai=22|mi=1|ar=DAMAGER|cl=SHAMAN|il=280.9|lv=90.more noise",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(
+    entries[0].preview,
+    "LNNRANK|ch=lnnrank0ff24cf4|ss=|n=75|rg=us|re=Stormrage|nm=Tskihi|sr=applicant|ai=22|mi=1|ar=DAMAGER|cl=SHAMAN|il=280.9|lv=90"
   );
 });
 

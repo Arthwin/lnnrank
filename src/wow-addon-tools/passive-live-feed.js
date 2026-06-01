@@ -168,7 +168,7 @@ function normalizeScanResult(result) {
 
 function extractCanonicalPayload(text) {
   const match = String(text || "").match(
-    /LNNRANK\|ch=[A-Za-z0-9_:=.]{1,30}\|ss=[A-Za-z0-9_:=.]{1,20}\|n=\d{1,10}\|rg=[A-Za-z0-9_:=.]{1,8}\|re=[A-Za-z0-9_:=.]{1,32}\|nm=[A-Za-z0-9_:=.]{1,32}\|sr=[A-Za-z0-9_]{1,16}(?:\|ai=\d{1,10})?(?:\|mi=\d{1,3})?(?:\|ar=[A-Za-z0-9_:=.]{1,16})?(?:\|cl=[A-Za-z0-9_:=.]{1,16})?(?:\|il=\d{1,4}(?:\.\d{1,2})?)?(?:\|lv=\d{1,3})?/u
+    /LNNRANK\|ch=[A-Za-z0-9_:=.]{1,30}\|ss=[A-Za-z0-9_:=.]{0,20}\|n=\d{1,10}\|rg=[A-Za-z0-9_:=.]{1,8}\|re=[A-Za-z0-9_:=.]{1,32}\|nm=[A-Za-z0-9_:=.]{1,32}\|sr=[A-Za-z0-9_]{1,16}(?:\|ai=\d{1,10})?(?:\|mi=\d{1,3})?(?:\|ar=[A-Za-z0-9_:=.]{1,16})?(?:\|cl=[A-Za-z0-9_:=.]{1,16})?(?:\|il=\d{1,4}(?:\.\d{1,2})?)?(?:\|lv=\d{1,3})?/u
   );
   if (!match) {
     return null;
@@ -307,18 +307,18 @@ function buildPassiveDiscoveryPattern(passiveBridge) {
   const playerKey = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.playerKey);
 
   if (channelName && playerKey && channelName.includes(playerKey)) {
-    return channelName;
+    return `LNNRANK|ch=${channelName}`;
   }
 
   if (playerKey.length >= 6) {
-    return `lnnrank${playerKey.slice(-6)}`;
+    return `LNNRANK|ch=lnnrank${playerKey}`;
   }
 
   if (channelName.startsWith("lnnrank") && channelName.length > "lnnrank".length + 4) {
-    return channelName.slice(0, -4);
+    return `LNNRANK|ch=${channelName}`;
   }
 
-  return channelName || null;
+  return channelName ? `LNNRANK|ch=${channelName}` : null;
 }
 
 function createPassiveLiveFeedMonitor(options = {}) {

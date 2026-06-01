@@ -881,7 +881,7 @@ function formatPassiveLiveStatus(liveFeed) {
 
 function parsePassivePayloadEnvelope(payload) {
   const match = String(payload || "").match(
-    /^LNNRANK\|ch=([^|]+)\|ss=([^|]+)\|n=(\d+)\|rg=([^|]+)\|re=([^|]+)\|nm=([^|]+)\|sr=([^|]+)(?:\|.*)?$/u
+    /^LNNRANK\|ch=([^|]+)\|ss=([^|]*)\|n=(\d+)\|rg=([^|]+)\|re=([^|]+)\|nm=([^|]+)\|sr=([^|]+)(?:\|.*)?$/u
   );
   if (!match) {
     return null;
