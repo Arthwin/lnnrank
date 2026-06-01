@@ -215,9 +215,15 @@ function parsePassivePayload(payload) {
   };
 }
 
+function getPassiveLiveSourceEntries(passiveLiveFeedState) {
+  if (passiveLiveFeedState && Array.isArray(passiveLiveFeedState.events) && passiveLiveFeedState.events.length > 0) {
+    return passiveLiveFeedState.events;
+  }
+  return passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [];
+}
+
 function parsePassiveLiveEntries(passiveLiveFeedState) {
-  const liveEntries =
-    passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [];
+  const liveEntries = getPassiveLiveSourceEntries(passiveLiveFeedState);
 
   return liveEntries
     .filter((entry) => entry && entry.kind === "payload" && typeof entry.preview === "string")
@@ -226,22 +232,24 @@ function parsePassiveLiveEntries(passiveLiveFeedState) {
       if (!payload) {
         return null;
       }
+      const eventAt = entry.eventAt || entry.firstSeenAt || entry.lastSeenAt || null;
+      const eventAtMs = Date.parse(eventAt || "");
       return {
         ...payload,
-        updatedAt: entry.lastSeenAt || entry.firstSeenAt || null,
-        lastSeenAt: toUnixSecondsFromIso(entry.lastSeenAt || entry.firstSeenAt),
+        eventAt,
+        eventAtMs: Number.isFinite(eventAtMs) ? eventAtMs : 0,
+        updatedAt: eventAt,
+        lastSeenAt: toUnixSecondsFromIso(eventAt),
       };
     })
     .filter(Boolean);
 }
 
 function comparePassiveLiveEntryRecency(left, right) {
-  const leftParsed = Date.parse((left && left.updatedAt) || "");
-  const rightParsed = Date.parse((right && right.updatedAt) || "");
-  const leftUpdatedAtMs = Number.isFinite(leftParsed) ? leftParsed : 0;
-  const rightUpdatedAtMs = Number.isFinite(rightParsed) ? rightParsed : 0;
-  if (leftUpdatedAtMs !== rightUpdatedAtMs) {
-    return rightUpdatedAtMs - leftUpdatedAtMs;
+  const leftEventAtMs = Number((left && left.eventAtMs) || 0);
+  const rightEventAtMs = Number((right && right.eventAtMs) || 0);
+  if (leftEventAtMs !== rightEventAtMs) {
+    return rightEventAtMs - leftEventAtMs;
   }
 
   const leftSequence = Number((left && left.sequence) || 0);
@@ -330,8 +338,7 @@ function pickPreferredPassiveQueueEntry(existing, candidate) {
 }
 
 function buildPassiveLiveQueue(passiveLiveFeedState) {
-  const liveEntries =
-    passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [];
+  const liveEntries = getPassiveLiveSourceEntries(passiveLiveFeedState);
   const queueEntries = new Map();
 
   for (const liveEntry of liveEntries) {
@@ -348,7 +355,7 @@ function buildPassiveLiveQueue(passiveLiveFeedState) {
       continue;
     }
 
-    const updatedAt = liveEntry.lastSeenAt || liveEntry.firstSeenAt || null;
+    const updatedAt = liveEntry.eventAt || liveEntry.firstSeenAt || liveEntry.lastSeenAt || null;
     const key = buildCacheKey(payload.region, payload.realm, payload.characterName);
     const candidate = {
       key,
@@ -358,8 +365,8 @@ function buildPassiveLiveQueue(passiveLiveFeedState) {
       source: payload.source,
       requestOrigin: "passive-live",
       updatedAt,
-      firstSeenAt: liveEntry.firstSeenAt || null,
-      lastSeenAt: toUnixSecondsFromIso(liveEntry.lastSeenAt || liveEntry.firstSeenAt),
+      firstSeenAt: updatedAt,
+      lastSeenAt: toUnixSecondsFromIso(updatedAt),
       seenCount: Number(liveEntry.seenCount || 0) || 1,
       sequence: payload.sequence,
       channelName: payload.channelName,
@@ -713,6 +720,7 @@ async function createDashboardServer(options = {}) {
     entries: new Map(),
     lastSavedVariablesModifiedMs: null,
     lastPassiveSequence: 0,
+    lastPassiveEventAtMs: 0,
     passiveSessionKey: null,
     latestLiveEventAtMs: 0,
   };
@@ -831,19 +839,26 @@ async function createDashboardServer(options = {}) {
     const passiveLiveScope = buildPassiveLiveScope(passiveBridge, passiveLiveFeedState);
     const passiveSessionKey = buildPassiveSessionKey(passiveBridge, passiveLiveScope);
     if (passiveSessionKey !== lfgRuntime.passiveSessionKey) {
+      resetLfgRuntimeState();
       lfgRuntime.passiveSessionKey = passiveSessionKey;
       lfgRuntime.lastPassiveSequence = 0;
     }
 
     const liveEvents = selectPassiveLiveEvents(passiveBridge, passiveLiveFeedState)
       .filter((entry) => entry.source === "applicant" || entry.source === "appclear")
+      .filter((entry) => Number(entry.eventAtMs || 0) > Number(lfgRuntime.lastPassiveEventAtMs || 0))
       .sort((left, right) => {
+        const leftEventAtMs = Number(left.eventAtMs || 0);
+        const rightEventAtMs = Number(right.eventAtMs || 0);
+        if (leftEventAtMs !== rightEventAtMs) {
+          return leftEventAtMs - rightEventAtMs;
+        }
         const leftSequence = Number(left.sequence || 0);
         const rightSequence = Number(right.sequence || 0);
         if (leftSequence !== rightSequence) {
           return leftSequence - rightSequence;
         }
-        return String(left.updatedAt || "").localeCompare(String(right.updatedAt || ""), "en-US");
+        return String(left.payload || "").localeCompare(String(right.payload || ""), "en-US");
       });
 
     for (const entry of liveEvents) {
@@ -859,10 +874,12 @@ async function createDashboardServer(options = {}) {
       }
 
       lfgRuntime.lastPassiveSequence = sequence;
-      const updatedAtMs = Date.parse(entry.updatedAt || "");
-      if (Number.isFinite(updatedAtMs)) {
-        lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, updatedAtMs);
-      }
+      lfgRuntime.lastPassiveEventAtMs = Math.max(lfgRuntime.lastPassiveEventAtMs, Number(entry.eventAtMs || 0));
+      lfgRuntime.latestLiveEventAtMs = Math.max(
+        lfgRuntime.latestLiveEventAtMs,
+        Number(entry.eventAtMs || 0),
+        Date.parse(entry.updatedAt || "") || 0
+      );
     }
   }
 
@@ -1177,13 +1194,15 @@ async function createDashboardServer(options = {}) {
 
       if (request.method === "POST" && requestUrl.pathname === "/api/lfg/clear") {
         const savedVariables = loadSavedVariablesSnapshot(accountRoot);
-        if (savedVariables && savedVariables.lastModifiedMs != null) {
-          lfgRuntime.lastSavedVariablesModifiedMs = savedVariables.lastModifiedMs;
-        }
-        resetLfgRuntimeState();
+      if (savedVariables && savedVariables.lastModifiedMs != null) {
+        lfgRuntime.lastSavedVariablesModifiedMs = savedVariables.lastModifiedMs;
+      }
+      resetLfgRuntimeState();
+      lfgRuntime.lastPassiveEventAtMs = Date.now();
+      lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, lfgRuntime.lastPassiveEventAtMs);
 
-        jsonResponse(response, 200, {
-          ok: true,
+      jsonResponse(response, 200, {
+        ok: true,
           state: snapshotState(),
         });
         return;

@@ -717,7 +717,7 @@ test("dashboard state merges passive live applicant payloads into the queue and 
   assert.equal(state.applicants[0].class, "PRIEST");
   assert.equal(state.applicants[0].itemLevel, 637.4);
   assert.equal(state.applicants[0].level, 80);
-  assert.equal(state.applicants[0].lastSeenAt, 1780272012);
+  assert.equal(state.applicants[0].lastSeenAt, 1780272010);
 
   const requests = buildSyncRequestsFromQueue(state.queue);
   assert.equal(requests.length, 1);
@@ -1118,6 +1118,310 @@ test("dashboard server snapshot applies live applicants from the newest passive 
     assert.equal(state.applicants.length, 1);
     assert.equal(state.applicants[0].characterName, "Freshone");
     assert.equal(state.applicants[0].applicantID, 22);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("dashboard server clears carried LFG applicants when the passive live session rolls over", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-session-rollover-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf42108",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  let passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    entries: [
+      {
+        key: "payload:old-applicant",
+        kind: "payload",
+        preview:
+          "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf42108|n=44|rg=us|re=Sargeras|nm=Oldsession|sr=applicant|ai=11|mi=1|ar=DAMAGER|cl=MAGE|il=279.4|lv=90",
+        firstSeenAt: "2026-06-01T00:00:02.000Z",
+        lastSeenAt: "2026-06-01T00:00:04.000Z",
+      },
+    ],
+  };
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+    testHooks,
+  });
+
+  try {
+    const beforeRollover = testHooks.snapshotState();
+    assert.equal(beforeRollover.applicants.length, 1);
+    assert.equal(beforeRollover.applicants[0].characterName, "Oldsession");
+
+    passiveLiveFeedState = {
+      supported: true,
+      status: "ready",
+      entries: [
+        {
+          key: "payload:new-clear",
+          kind: "payload",
+          preview: "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf44635|n=216|rg=us|re=Stormrage|nm=Urmomgargles|sr=appclear",
+          firstSeenAt: "2026-06-01T00:00:10.000Z",
+          lastSeenAt: "2026-06-01T00:00:11.000Z",
+        },
+      ],
+    };
+
+    const afterRollover = testHooks.snapshotState();
+    assert.equal(afterRollover.applicants.length, 0);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("dashboard server prefers timestamped passive events over stale memory entries", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-event-stream-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44635",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: {
+      supported: true,
+      status: "ready",
+      entries: [
+        {
+          key: "stale-entry-1",
+          kind: "payload",
+          preview:
+            "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf43629|n=1337|rg=us|re=Area52|nm=Capsmunchin|sr=applicant|ai=46|mi=1|ar=DAMAGER|cl=WARLOCK|il=278.6|lv=90",
+          firstSeenAt: "2026-06-01T00:00:01.000Z",
+          lastSeenAt: "2026-06-01T00:00:30.000Z",
+        },
+      ],
+      events: [
+        {
+          key: "event-clear",
+          kind: "payload",
+          preview: "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf44635|n=216|rg=us|re=Stormrage|nm=Urmomgargles|sr=appclear",
+          eventAt: "2026-06-01T00:00:10.000Z",
+        },
+      ],
+    },
+    testHooks,
+  });
+
+  try {
+    const state = testHooks.snapshotState();
+    assert.equal(state.applicants.length, 0);
+    assert.equal(state.queue.length, 0);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("clear LFG advances the passive event cursor so older live events stay ignored", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-clear-cursor-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44635",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  let passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    events: [
+      {
+        key: "event-applicant-1",
+        kind: "payload",
+        preview:
+          "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf44635|n=300|rg=us|re=Stormrage|nm=Firstone|sr=applicant|ai=51|mi=1|ar=DAMAGER|cl=ROGUE|il=281.0|lv=90",
+        eventAt: "2026-06-01T00:00:01.000Z",
+      },
+    ],
+  };
+
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+
+  try {
+    const port = server.address().port;
+    let response = await fetch(`http://127.0.0.1:${port}/api/state`);
+    let state = await response.json();
+    assert.equal(state.applicants.length, 1);
+    assert.equal(state.applicants[0].characterName, "Firstone");
+
+    await fetch(`http://127.0.0.1:${port}/api/lfg/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    response = await fetch(`http://127.0.0.1:${port}/api/state`);
+    state = await response.json();
+    assert.equal(state.applicants.length, 0);
+
+    passiveLiveFeedState = {
+      supported: true,
+      status: "ready",
+      events: [
+        {
+          key: "event-applicant-1",
+          kind: "payload",
+          preview:
+            "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf44635|n=300|rg=us|re=Stormrage|nm=Firstone|sr=applicant|ai=51|mi=1|ar=DAMAGER|cl=ROGUE|il=281.0|lv=90",
+          eventAt: "2026-06-01T00:00:01.000Z",
+        },
+        {
+          key: "event-applicant-2",
+          kind: "payload",
+          preview:
+            "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf44635|n=301|rg=us|re=Stormrage|nm=Secondone|sr=applicant|ai=52|mi=1|ar=HEALER|cl=PRIEST|il=283.5|lv=90",
+          eventAt: new Date(Date.now() + 1000).toISOString(),
+        },
+      ],
+    };
+
+    response = await fetch(`http://127.0.0.1:${port}/api/state`);
+    state = await response.json();
+    assert.equal(state.applicants.length, 1);
+    assert.equal(state.applicants[0].characterName, "Secondone");
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

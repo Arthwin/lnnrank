@@ -15,6 +15,7 @@ const DEFAULT_READ_TIMEOUT_MS = 3000;
 const DEFAULT_MAX_MATCHES = 24;
 const DEFAULT_CONTEXT_BYTES = 192;
 const LIVE_ENTRY_LIMIT = 40;
+const LIVE_EVENT_LIMIT = 400;
 const DEFAULT_DISCOVERY_REFRESH_MS = 5000;
 
 let helperBuildPromise = null;
@@ -345,6 +346,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
     scanDurationMs: null,
     discoveryAddresses: [],
     entries: [],
+    events: [],
     currentPromise: null,
   };
 
@@ -358,11 +360,13 @@ function createPassiveLiveFeedMonitor(options = {}) {
     state.scanDurationMs = null;
     state.discoveryAddresses = [];
     state.entries = [];
+    state.events = [];
     state.status = channelName ? "idle" : "waiting";
   }
 
   function mergeEntries(nextEntries, observedAtIso) {
     const merged = new Map(state.entries.map((entry) => [entry.key, entry]));
+    const newEvents = [];
     for (const entry of nextEntries) {
       if (entry.encoding === "window" && entry.address) {
         for (const [existingKey, existingEntry] of merged.entries()) {
@@ -388,11 +392,20 @@ function createPassiveLiveFeedMonitor(options = {}) {
         lastSeenAt: observedAtIso,
         seenCount: 1,
       });
+      newEvents.push({
+        ...entry,
+        eventAt: observedAtIso,
+      });
     }
 
     state.entries = [...merged.values()]
       .sort((left, right) => String(right.lastSeenAt || "").localeCompare(String(left.lastSeenAt || ""), "en-US"))
       .slice(0, LIVE_ENTRY_LIMIT);
+    if (newEvents.length > 0) {
+      state.events = [...state.events, ...newEvents]
+        .sort((left, right) => String(left.eventAt || "").localeCompare(String(right.eventAt || ""), "en-US"))
+        .slice(-LIVE_EVENT_LIMIT);
+    }
   }
 
   function snapshot() {
@@ -408,6 +421,8 @@ function createPassiveLiveFeedMonitor(options = {}) {
       discoveryAddresses: state.discoveryAddresses,
       entries: state.entries,
       entryCount: state.entries.length,
+      events: state.events,
+      eventCount: state.events.length,
     };
   }
 
