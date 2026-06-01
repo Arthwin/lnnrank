@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
@@ -16,6 +17,25 @@ if (string.Equals(args[0], "discover", StringComparison.OrdinalIgnoreCase))
     var options = DiscoverOptions.Parse(args.Skip(1).ToArray());
     var stopwatch = Stopwatch.StartNew();
     var matches = PassiveScanner.Discover(options);
+    stopwatch.Stop();
+
+    var payload = new
+    {
+        processId = options.ProcessId,
+        pattern = options.Pattern,
+        durationMs = stopwatch.ElapsedMilliseconds,
+        matches
+    };
+
+    Console.WriteLine(JsonSerializer.Serialize(payload));
+    return;
+}
+
+if (string.Equals(args[0], "scan-regions", StringComparison.OrdinalIgnoreCase))
+{
+    var options = ScanRegionsOptions.Parse(args.Skip(1).ToArray());
+    var stopwatch = Stopwatch.StartNew();
+    var matches = PassiveScanner.ScanRegions(options);
     stopwatch.Stop();
 
     var payload = new
@@ -114,6 +134,106 @@ internal sealed record DiscoverOptions(
     }
 }
 
+internal sealed record ScanRegionsOptions(
+    int ProcessId,
+    IReadOnlyList<RegionSpec> Regions,
+    string Pattern,
+    int MaxMatches,
+    int ContextBytes,
+    int ChunkSizeBytes)
+{
+    public static ScanRegionsOptions Parse(string[] args)
+    {
+        int? processId = null;
+        var regions = new List<RegionSpec>();
+        string pattern = "LNNRANK|";
+        int maxMatches = 24;
+        int contextBytes = 192;
+        int chunkSizeBytes = 1024 * 1024;
+
+        for (var index = 0; index < args.Length; index += 1)
+        {
+            var arg = args[index];
+            string NextValue()
+            {
+                if (index + 1 >= args.Length)
+                {
+                    throw new ArgumentException($"Missing value after {arg}.");
+                }
+
+                index += 1;
+                return args[index];
+            }
+
+            switch (arg)
+            {
+                case "--pid":
+                    processId = int.Parse(NextValue());
+                    break;
+                case "--regions":
+                    foreach (var value in NextValue().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        var parts = value.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                        if (parts.Length != 2)
+                        {
+                            throw new ArgumentException($"Invalid region spec '{value}'. Expected base:size.");
+                        }
+
+                        var baseAddress = ParseLongValue(parts[0]);
+                        var regionSize = ParseLongValue(parts[1]);
+                        if (baseAddress <= 0 || regionSize <= 0)
+                        {
+                            continue;
+                        }
+
+                        regions.Add(new RegionSpec(baseAddress, regionSize));
+                    }
+                    break;
+                case "--pattern":
+                    pattern = NextValue();
+                    break;
+                case "--maxMatches":
+                    maxMatches = int.Parse(NextValue());
+                    break;
+                case "--contextBytes":
+                    contextBytes = int.Parse(NextValue());
+                    break;
+                case "--chunkSizeBytes":
+                    chunkSizeBytes = int.Parse(NextValue());
+                    break;
+            }
+        }
+
+        if (processId is null || processId <= 0)
+        {
+            throw new ArgumentException("--pid is required.");
+        }
+
+        if (regions.Count == 0)
+        {
+            throw new ArgumentException("--regions is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(pattern))
+        {
+            throw new ArgumentException("--pattern is required.");
+        }
+
+        return new ScanRegionsOptions(processId.Value, regions, pattern, maxMatches, contextBytes, chunkSizeBytes);
+    }
+
+    private static long ParseLongValue(string value)
+    {
+        var normalized = string.IsNullOrWhiteSpace(value) ? "" : value.Trim();
+        if (normalized.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            return Convert.ToInt64(normalized[2..], 16);
+        }
+
+        return long.Parse(normalized, CultureInfo.InvariantCulture);
+    }
+}
+
 internal sealed record ReadOptions(
     int ProcessId,
     IReadOnlyList<long> Addresses,
@@ -171,6 +291,8 @@ internal sealed record ReadOptions(
     }
 }
 
+internal sealed record RegionSpec(long BaseAddress, long RegionSize);
+
 internal static class PassiveScanner
 {
     private const uint ProcessQueryInformation = 0x0400;
@@ -181,12 +303,8 @@ internal static class PassiveScanner
 
     public static IReadOnlyList<MatchResult> Discover(DiscoverOptions options)
     {
-        var patternSets = new[]
-        {
-            new PatternSet("utf8", Encoding.UTF8.GetBytes(options.Pattern)),
-            new PatternSet("utf16", Encoding.Unicode.GetBytes(options.Pattern)),
-        };
-        var overlapBytes = Math.Max(options.ContextBytes, patternSets.Max(set => set.Bytes.Length) - 1);
+        var patternSets = CreatePatternSets(options.Pattern);
+        var overlapBytes = GetOverlapBytes(options.ContextBytes, patternSets);
         var results = new List<MatchResult>();
         var seenKeys = new HashSet<string>(StringComparer.Ordinal);
 
@@ -232,7 +350,40 @@ internal static class PassiveScanner
                 processHandle,
                 region.RegionBase,
                 region.RegionSize,
-                options,
+                options.MaxMatches,
+                options.ContextBytes,
+                options.ChunkSizeBytes,
+                overlapBytes,
+                patternSets,
+                results,
+                seenKeys);
+        }
+
+        return results;
+    }
+
+    public static IReadOnlyList<MatchResult> ScanRegions(ScanRegionsOptions options)
+    {
+        var patternSets = CreatePatternSets(options.Pattern);
+        var overlapBytes = GetOverlapBytes(options.ContextBytes, patternSets);
+        var results = new List<MatchResult>();
+        var seenKeys = new HashSet<string>(StringComparer.Ordinal);
+
+        using var processHandle = OpenProcess(options.ProcessId);
+        foreach (var region in options.Regions)
+        {
+            if (results.Count >= options.MaxMatches)
+            {
+                break;
+            }
+
+            ScanRegion(
+                processHandle,
+                region.BaseAddress,
+                region.RegionSize,
+                options.MaxMatches,
+                options.ContextBytes,
+                options.ChunkSizeBytes,
                 overlapBytes,
                 patternSets,
                 results,
@@ -265,7 +416,15 @@ internal static class PassiveScanner
             }
 
             var actualBytes = bytesRead == buffer.Length ? buffer : buffer.AsSpan(0, (int)bytesRead).ToArray();
-            results.Add(BuildMatch("window", address, baseAddress, actualBytes, options.ContextBytes, 0, options.ContextBytes));
+            results.Add(BuildMatch(
+                "window",
+                address,
+                baseAddress,
+                actualBytes.LongLength,
+                actualBytes,
+                options.ContextBytes,
+                0,
+                options.ContextBytes));
         }
 
         return results;
@@ -275,7 +434,9 @@ internal static class PassiveScanner
         SafeProcessHandle processHandle,
         long regionBase,
         long regionSize,
-        DiscoverOptions options,
+        int maxMatches,
+        int contextBytes,
+        int chunkSizeBytes,
         int overlapBytes,
         IReadOnlyList<PatternSet> patternSets,
         List<MatchResult> results,
@@ -284,10 +445,10 @@ internal static class PassiveScanner
         var tail = Array.Empty<byte>();
         long offset = 0;
 
-        while (offset < regionSize && results.Count < options.MaxMatches)
+        while (offset < regionSize && results.Count < maxMatches)
         {
             var remaining = regionSize - offset;
-            var chunkSize = (int)Math.Min(options.ChunkSizeBytes, remaining);
+            var chunkSize = (int)Math.Min(chunkSizeBytes, remaining);
             if (chunkSize <= 0)
             {
                 break;
@@ -322,14 +483,22 @@ internal static class PassiveScanner
                         continue;
                     }
 
-                    results.Add(BuildMatch(patternSet.Name, absoluteAddress, regionBase, combined, matchOffset, patternSet.Bytes.Length, options.ContextBytes));
-                    if (results.Count >= options.MaxMatches)
+                    results.Add(BuildMatch(
+                        patternSet.Name,
+                        absoluteAddress,
+                        regionBase,
+                        regionSize,
+                        combined,
+                        matchOffset,
+                        patternSet.Bytes.Length,
+                        contextBytes));
+                    if (results.Count >= maxMatches)
                     {
                         break;
                     }
                 }
 
-                if (results.Count >= options.MaxMatches)
+                if (results.Count >= maxMatches)
                 {
                     break;
                 }
@@ -345,6 +514,7 @@ internal static class PassiveScanner
         string encoding,
         long absoluteAddress,
         long regionBase,
+        long regionSize,
         byte[] combinedBuffer,
         int matchOffset,
         int patternLength,
@@ -360,9 +530,19 @@ internal static class PassiveScanner
             Address: $"0x{absoluteAddress:X}",
             Encoding: encoding,
             RegionBase: $"0x{regionBase:X}",
+            RegionSize: regionSize.ToString(CultureInfo.InvariantCulture),
             PreviewUtf8: SanitizePreview(Encoding.UTF8.GetString(previewBytes)),
             PreviewUtf16: SanitizePreview(Encoding.Unicode.GetString(utf16Bytes)));
     }
+
+    private static IReadOnlyList<PatternSet> CreatePatternSets(string pattern) => new[]
+    {
+        new PatternSet("utf8", Encoding.UTF8.GetBytes(pattern)),
+        new PatternSet("utf16", Encoding.Unicode.GetBytes(pattern)),
+    };
+
+    private static int GetOverlapBytes(int contextBytes, IReadOnlyList<PatternSet> patternSets) =>
+        Math.Max(contextBytes, patternSets.Max(set => set.Bytes.Length) - 1);
 
     private static string SanitizePreview(string value)
     {
@@ -448,6 +628,7 @@ internal sealed record MatchResult(
     string Address,
     string Encoding,
     string RegionBase,
+    string RegionSize,
     string PreviewUtf8,
     string PreviewUtf16);
 

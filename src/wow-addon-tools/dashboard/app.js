@@ -1180,6 +1180,10 @@ function renderPassive(data) {
   const pagedLogEntries = paginateItems(logEntries, state.liveLogPage, LIVE_LOG_PAGE_SIZE);
   state.liveLogPage = pagedLogEntries.page;
   persistViewState();
+  const liveLogStatusNote =
+    liveFeed && liveFeed.lastError && logEntries.length === 0
+      ? liveFeed.lastError
+      : `${logEntries.length} visible log entr${logEntries.length === 1 ? "y" : "ies"}`;
   const statsMarkup = [
     createPassiveStatChip("Live", liveStatus),
     createPassiveStatChip("Channel", passiveState.channelName || "Unknown", { code: true }),
@@ -1203,11 +1207,7 @@ function renderPassive(data) {
           <p>${escapeHtml(playerLabel)} <span class="passive-head-sep">·</span> ${escapeHtml(regionLabel)}</p>
         </div>
         <div class="passive-inline-note">
-          ${escapeHtml(
-            liveFeed && liveFeed.lastError
-              ? liveFeed.lastError
-              : `${logEntries.length} visible log entr${logEntries.length === 1 ? "y" : "ies"}`
-          )}
+          ${escapeHtml(liveLogStatusNote)}
         </div>
       </div>
       <div class="passive-stat-grid">

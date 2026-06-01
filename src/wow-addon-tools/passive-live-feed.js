@@ -15,13 +15,14 @@ const HELPER_SOURCE_PATH = path.join(__dirname, "passive-live-scanner", "Program
 const HELPER_OUTPUT_DIR = path.join(REPO_ROOT, "output", "passive-live-scanner");
 const HELPER_DLL_PATH = path.join(HELPER_OUTPUT_DIR, "PassiveLiveScanner.dll");
 const DEFAULT_SCAN_INTERVAL_MS = 1500;
-const DEFAULT_DISCOVERY_TIMEOUT_MS = 25000;
-const DEFAULT_READ_TIMEOUT_MS = 3000;
+const DEFAULT_DISCOVERY_TIMEOUT_MS = 60000;
+const DEFAULT_REGION_SCAN_TIMEOUT_MS = 4000;
 const DEFAULT_MAX_MATCHES = 24;
 const DEFAULT_CONTEXT_BYTES = 192;
 const LIVE_ENTRY_LIMIT = 40;
 const LIVE_EVENT_LIMIT = 400;
-const DEFAULT_DISCOVERY_REFRESH_MS = 5000;
+const LIVE_REGION_LIMIT = 4;
+const DEFAULT_DISCOVERY_REFRESH_MS = 45000;
 
 let helperBuildPromise = null;
 
@@ -139,22 +140,26 @@ async function discoverPassiveChannelMemory(options) {
   return normalizeScanResult(JSON.parse(stdout));
 }
 
-async function readPassiveMemoryAddresses(options) {
+async function scanPassiveMemoryRegions(options) {
   const helperPath = await ensureHelperBuilt();
   const args = [
     helperPath,
-    "read",
+    "scan-regions",
     "--pid",
     String(options.processId),
-    "--addresses",
-    options.addresses.map((entry) => String(entry)).join(","),
+    "--regions",
+    options.regions.map((entry) => `${String(entry.regionBase)}:${String(entry.regionSize)}`).join(","),
+    "--pattern",
+    String(options.pattern || "LNNRANK|"),
+    "--maxMatches",
+    String(options.maxMatches || DEFAULT_MAX_MATCHES),
     "--contextBytes",
     String(options.contextBytes || DEFAULT_CONTEXT_BYTES),
   ];
 
   const { stdout } = await execFileText("dotnet", args, {
     cwd: REPO_ROOT,
-    timeout: options.timeoutMs || DEFAULT_READ_TIMEOUT_MS,
+    timeout: options.timeoutMs || DEFAULT_REGION_SCAN_TIMEOUT_MS,
   });
   return normalizeScanResult(JSON.parse(stdout));
 }
@@ -167,6 +172,7 @@ function normalizeScanResult(result) {
       address: match.address || match.Address || null,
       encoding: match.encoding || match.Encoding || null,
       regionBase: match.regionBase || match.RegionBase || null,
+      regionSize: match.regionSize || match.RegionSize || null,
       previewUtf8: match.previewUtf8 || match.PreviewUtf8 || "",
       previewUtf16: match.previewUtf16 || match.PreviewUtf16 || "",
     })),
@@ -308,6 +314,8 @@ function parsePassiveCandidateMetadata(preview) {
       payload: null,
       eventType: null,
       source: null,
+      channelName: null,
+      sessionId: null,
       sequence: 0,
       timestampMs: 0,
     };
@@ -318,6 +326,8 @@ function parsePassiveCandidateMetadata(preview) {
     payload,
     eventType: parsed ? parsed.eventType : null,
     source: parsed ? parsed.source : null,
+    channelName: parsed ? parsed.channelName || null : null,
+    sessionId: parsed ? parsed.sessionId || null : null,
     sequence: parsed ? Number(parsed.sequence || 0) : 0,
     timestampMs: parsed ? Number(parsed.capturedAtMs || 0) : extractPayloadTimestampMs(payload) || 0,
   };
@@ -346,6 +356,85 @@ function getPassiveCandidateSourceWeight(eventType, source) {
   }
 }
 
+function comparePassiveCandidates(left, right) {
+  return (
+    right.channelMatch - left.channelMatch ||
+    right.sessionMatch - left.sessionMatch ||
+    right.sourceWeight - left.sourceWeight ||
+    right.timestampMs - left.timestampMs ||
+    right.sequence - left.sequence ||
+    right.versionWeight - left.versionWeight ||
+    right.priority - left.priority ||
+    right.numericAddress - left.numericAddress
+  );
+}
+
+function selectPassiveRegionCandidates(scanResult, options = {}) {
+  const matches = Array.isArray(scanResult && scanResult.matches) ? scanResult.matches : [];
+  const preferredChannelName = normalizePassiveDiscoveryToken(options.preferredChannelName);
+  const preferredSessionId = String(options.preferredSessionId || "").trim();
+  const regionCandidates = new Map();
+
+  for (const match of matches) {
+    const preview = String(match.previewUtf8 || match.previewUtf16 || "");
+    const metadata = parsePassiveCandidateMetadata(preview);
+    const numericAddress = Number.parseInt(String(match.address || "").replace(/^0x/iu, ""), 16);
+    const numericRegionBase = Number.parseInt(String(match.regionBase || "").replace(/^0x/iu, ""), 16);
+    const regionSize = Number.parseInt(String(match.regionSize || ""), 10);
+
+    if (!Number.isFinite(numericAddress) || numericAddress <= 0 || !Number.isFinite(numericRegionBase) || numericRegionBase <= 0) {
+      continue;
+    }
+    if (!Number.isFinite(regionSize) || regionSize <= 0) {
+      continue;
+    }
+
+    let priority = 0;
+    if (preview.includes("]:")) {
+      priority += 3;
+    }
+    if (preview.includes("LNNRANK|")) {
+      priority += 2;
+    }
+    if (preview.includes("lnnrank")) {
+      priority += 1;
+    }
+    if (preview.includes("|v=2|")) {
+      priority += 2;
+    }
+
+    const candidate = {
+      regionBase: `0x${numericRegionBase.toString(16).toUpperCase("en-US")}`,
+      regionSize,
+      numericAddress,
+      priority,
+      sourceWeight: getPassiveCandidateSourceWeight(metadata.eventType, metadata.source),
+      timestampMs: metadata.timestampMs,
+      sequence: metadata.sequence,
+      versionWeight: preview.includes("|v=2|") ? 1 : 0,
+      channelMatch:
+        preferredChannelName &&
+        normalizePassiveDiscoveryToken(metadata.channelName || "") === preferredChannelName
+          ? 1
+          : 0,
+      sessionMatch: preferredSessionId && metadata.sessionId === preferredSessionId ? 1 : 0,
+    };
+    const regionKey = `${candidate.regionBase}:${candidate.regionSize}`;
+    const existing = regionCandidates.get(regionKey);
+    if (!existing || comparePassiveCandidates(existing, candidate) > 0) {
+      regionCandidates.set(regionKey, candidate);
+    }
+  }
+
+  return [...regionCandidates.values()]
+    .sort(comparePassiveCandidates)
+    .slice(0, LIVE_REGION_LIMIT)
+    .map((entry) => ({
+      regionBase: entry.regionBase,
+      regionSize: entry.regionSize,
+    }));
+}
+
 function selectPassiveAddressCandidates(scanResult) {
   const matches = Array.isArray(scanResult && scanResult.matches) ? scanResult.matches : [];
   return matches
@@ -368,19 +457,15 @@ function selectPassiveAddressCandidates(scanResult) {
         numericAddress: Number.parseInt(String(match.address || "").replace(/^0x/iu, ""), 16),
         priority,
         sourceWeight: getPassiveCandidateSourceWeight(metadata.eventType, metadata.source),
+        channelMatch: 0,
+        sessionMatch: 0,
+        versionWeight: preview.includes("|v=2|") ? 1 : 0,
         timestampMs: metadata.timestampMs,
         sequence: metadata.sequence,
       };
     })
     .filter((entry) => Number.isFinite(entry.numericAddress) && entry.numericAddress > 0)
-    .sort(
-      (left, right) =>
-        right.sourceWeight - left.sourceWeight ||
-        right.timestampMs - left.timestampMs ||
-        right.sequence - left.sequence ||
-        right.priority - left.priority ||
-        right.numericAddress - left.numericAddress
-    )
+    .sort(comparePassiveCandidates)
     .slice(0, 24)
     .map((entry) => `0x${entry.numericAddress.toString(16).toUpperCase("en-US")}`);
 }
@@ -429,7 +514,8 @@ function createPassiveLiveFeedMonitor(options = {}) {
     lastDiscoveredAt: null,
     lastError: null,
     scanDurationMs: null,
-    discoveryAddresses: [],
+    discoveryRegions: [],
+    consecutiveMisses: 0,
     entries: [],
     events: [],
     currentPromise: null,
@@ -444,7 +530,8 @@ function createPassiveLiveFeedMonitor(options = {}) {
     state.lastDiscoveredAt = null;
     state.lastError = null;
     state.scanDurationMs = null;
-    state.discoveryAddresses = [];
+    state.discoveryRegions = [];
+    state.consecutiveMisses = 0;
     state.entries = [];
     state.events = [];
     state.status = channelName ? "idle" : "waiting";
@@ -511,7 +598,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
       lastScannedAt: state.lastScannedAt,
       lastError: state.lastError,
       scanDurationMs: state.scanDurationMs,
-      discoveryAddresses: state.discoveryAddresses,
+      discoveryRegions: state.discoveryRegions,
       entries: state.entries,
       entryCount: state.entries.length,
       events: state.events,
@@ -556,7 +643,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
     const lastScanMs = Date.parse(state.lastScannedAt || "");
     const lastDiscoveryMs = Date.parse(state.lastDiscoveredAt || "");
     const activeIntervalMs =
-      Array.isArray(state.discoveryAddresses) && state.discoveryAddresses.length > 0
+      Array.isArray(state.discoveryRegions) && state.discoveryRegions.length > 0
         ? scanIntervalMs
         : discoveryRetryIntervalMs;
     if (Number.isFinite(lastScanMs) && Date.now() - lastScanMs < activeIntervalMs) {
@@ -580,8 +667,8 @@ function createPassiveLiveFeedMonitor(options = {}) {
 
       state.wowProcessId = wowProcess.processId;
       const shouldRediscover =
-        !Array.isArray(state.discoveryAddresses) ||
-        state.discoveryAddresses.length === 0 ||
+        !Array.isArray(state.discoveryRegions) ||
+        state.discoveryRegions.length === 0 ||
         !Number.isFinite(lastDiscoveryMs) ||
         Date.now() - lastDiscoveryMs >= discoveryRefreshMs;
       const result = shouldRediscover
@@ -590,19 +677,31 @@ function createPassiveLiveFeedMonitor(options = {}) {
             channelName: discoveryPattern,
             maxMatches: options.maxMatches || DEFAULT_MAX_MATCHES,
           })
-        : await readPassiveMemoryAddresses({
+        : await scanPassiveMemoryRegions({
             processId: wowProcess.processId,
-            addresses: state.discoveryAddresses,
+            regions: state.discoveryRegions,
+            pattern: "LNNRANK|",
+            maxMatches: options.maxMatches || DEFAULT_MAX_MATCHES,
           });
       const observedAtIso = new Date().toISOString();
       const nextEntries = extractPassiveLiveFeedEntries(result);
       mergeEntries(nextEntries, observedAtIso);
-      if (shouldRediscover || !state.discoveryAddresses.length) {
-        state.discoveryAddresses = selectPassiveAddressCandidates(result);
+      if (shouldRediscover || !state.discoveryRegions.length) {
+        state.discoveryRegions = selectPassiveRegionCandidates(result, {
+          preferredChannelName: channelName,
+          preferredSessionId: sessionId,
+        });
         state.lastDiscoveredAt = observedAtIso;
       }
-      if (!nextEntries.some((entry) => entry.kind === "payload")) {
-        state.discoveryAddresses = [];
+      if (nextEntries.some((entry) => entry.kind === "payload")) {
+        state.consecutiveMisses = 0;
+      } else if (!shouldRediscover) {
+        state.consecutiveMisses += 1;
+        if (state.consecutiveMisses >= 3) {
+          state.discoveryRegions = [];
+          state.lastDiscoveredAt = null;
+          state.consecutiveMisses = 0;
+        }
       }
       state.lastScannedAt = observedAtIso;
       state.scanDurationMs = Number(result && result.durationMs) || Date.now() - scanStartedAt;
@@ -611,9 +710,6 @@ function createPassiveLiveFeedMonitor(options = {}) {
       .catch((error) => {
         state.status = "error";
         state.lastError = error.message || "Passive live feed scan failed.";
-        if (state.discoveryAddresses.length > 0) {
-          state.discoveryAddresses = [];
-        }
         state.lastScannedAt = new Date().toISOString();
         state.scanDurationMs = Date.now() - scanStartedAt;
       })
@@ -637,5 +733,6 @@ module.exports = {
   extractCanonicalPayload,
   extractPassiveLiveFeedEntries,
   normalizePassivePreview,
+  selectPassiveRegionCandidates,
   selectPassiveAddressCandidates,
 };

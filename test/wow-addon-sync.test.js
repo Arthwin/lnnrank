@@ -37,6 +37,7 @@ const {
 const {
   buildPassiveDiscoveryPattern,
   extractPassiveLiveFeedEntries,
+  selectPassiveRegionCandidates,
   selectPassiveAddressCandidates,
 } = require("../src/wow-addon-tools/passive-live-feed");
 const { parseAddonEventPayload } = require("../src/wow-addon-tools/addon-event-format");
@@ -737,6 +738,52 @@ test("passive address candidates prefer newer non-appclear payloads", () => {
   });
 
   assert.deepEqual(candidates.slice(0, 3), ["0x3000", "0x2000", "0x1000"]);
+});
+
+test("passive region candidates prefer current-session live regions over stale addon string regions", () => {
+  const candidates = selectPassiveRegionCandidates(
+    {
+      matches: [
+        {
+          address: "0x1000",
+          regionBase: "0x1000",
+          regionSize: "4096",
+          encoding: "utf8",
+          previewUtf8:
+            "LNNRANK|ch=lnnrank0ff24cf4|ss=oldsession|n=19738|rg=us|re=Stormrage|nm=Urmomgargles|sr=appclear|t=1780290468644",
+          previewUtf16: "",
+        },
+        {
+          address: "0x2000",
+          regionBase: "0x2000",
+          regionSize: "4096",
+          encoding: "utf8",
+          previewUtf8:
+            "LNNRANK|v=2|e=lfg_status|id=f24cf44941-81|ch=lnnrank0ff24cf4|ss=f24cf44941|n=81|t=1780322137757|rg=us|sr=lfg-status|hb=1780322137757|ix=0|tt=0",
+          previewUtf16: "",
+        },
+        {
+          address: "0x3000",
+          regionBase: "0x3000",
+          regionSize: "4096",
+          encoding: "utf8",
+          previewUtf8:
+            "LNNRANK|v=2|e=search|id=f24cf44941-82|ch=lnnrank0ff24cf4|ss=f24cf44941|n=82|t=1780322138758|rg=us|sr=unit|re=Stormrage|nm=Clickedunit",
+          previewUtf16: "",
+        },
+      ],
+    },
+    {
+      preferredChannelName: "lnnrank0ff24cf4",
+      preferredSessionId: "f24cf44941",
+    }
+  );
+
+  assert.deepEqual(candidates.slice(0, 3), [
+    { regionBase: "0x3000", regionSize: 4096 },
+    { regionBase: "0x2000", regionSize: 4096 },
+    { regionBase: "0x1000", regionSize: 4096 },
+  ]);
 });
 
 test("dashboard state merges passive live applicant payloads into the queue and LFG view", () => {
@@ -1486,6 +1533,95 @@ test("dashboard server exposes the active live passive session from brokered eve
     assert.equal(state.passiveBridge.sessionId, "f24cf44635");
     assert.equal(state.passiveLiveFeed.activeSessionId, "f24cf48076");
     assert.equal(state.passiveLiveFeed.events.length, 2);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("dashboard server prefers the newest live passive session even when stale saved-session events still exist", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-newest-live-session-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44941",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
+    passiveLiveFeedStateOverride: {
+      supported: true,
+      status: "ready",
+      entries: [
+        {
+          key: "stale-old-session",
+          kind: "payload",
+          preview:
+            "LNNRANK|v=2|e=search|id=f24cf44941-24760|ch=lnnrank0ff24cf4|ss=f24cf44941|n=24760|t=1780336540350|rg=us|sr=applicant|re=Oldstorm|nm=Staleone|gi=30|mi=1|ar=DAMAGER|cl=WARRIOR|il=284.9|lv=90",
+          eventAt: "2026-06-01T17:00:00.000Z",
+        },
+        {
+          key: "fresh-new-session",
+          kind: "payload",
+          preview:
+            "LNNRANK|v=2|e=search|id=f24cf46527-24761|ch=lnnrank0ff24cf4|ss=f24cf46527|n=24761|t=1780337540350|rg=us|sr=applicant|re=Newstorm|nm=Freshone|gi=31|mi=1|ar=HEALER|cl=PRIEST|il=285.9|lv=90",
+          eventAt: "2026-06-01T17:10:00.000Z",
+        },
+      ],
+    },
+    testHooks,
+  });
+
+  try {
+    const state = testHooks.snapshotState();
+    assert.equal(state.passiveBridge.sessionId, "f24cf44941");
+    assert.equal(state.passiveLiveFeed.activeSessionId, "f24cf46527");
+    assert.equal(state.passiveLiveFeed.events.length, 1);
+    assert.match(state.passiveLiveFeed.events[0].preview, /Freshone/);
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

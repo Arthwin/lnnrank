@@ -1714,15 +1714,12 @@ async function createDashboardServer(options = {}) {
       ? parsedEvents.filter((event) => event.channelName === channelName)
       : parsedEvents;
     const preferredSessionId = passiveBridge.sessionId || null;
-    const preferredSessionEvents = preferredSessionId
-      ? channelScopedEvents.filter((event) => event.sessionId === preferredSessionId)
-      : [];
+    const latestChannelEvent =
+      channelScopedEvents.length > 0
+        ? [...channelScopedEvents].sort(compareAddonEvents)[channelScopedEvents.length - 1]
+        : null;
     const activeSessionId =
-      preferredSessionEvents.length > 0
-        ? preferredSessionId
-        : channelScopedEvents.length > 0
-          ? [...channelScopedEvents].sort(compareAddonEvents)[channelScopedEvents.length - 1].sessionId || null
-          : preferredSessionId;
+      (latestChannelEvent && latestChannelEvent.sessionId) || preferredSessionId;
     const sessionScopedEvents = activeSessionId
       ? channelScopedEvents.filter((event) => event.sessionId === activeSessionId)
       : channelScopedEvents;
