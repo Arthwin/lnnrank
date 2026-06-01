@@ -1689,6 +1689,79 @@ async function createDashboardServer(options = {}) {
       .sort(compareAddonEvents);
   }
 
+  function buildPassiveLogicalEventKey(event) {
+    if (!event || typeof event !== "object") {
+      return null;
+    }
+
+    if (event.eventType === "lfg_status") {
+      return [
+        "lfg_status",
+        event.publisherKey || event.channelName || event.publisher || "default",
+        event.sessionId || "session",
+        event.heartbeatId || event.capturedAtMs || "heartbeat",
+        event.batchIndex != null ? event.batchIndex : "batch",
+      ].join(":");
+    }
+
+    return buildAddonEventIdentity(event);
+  }
+
+  function getPassiveLogicalEventScore(event) {
+    if (!event || typeof event !== "object") {
+      return [0, 0, 0, 0, 0];
+    }
+
+    if (event.eventType === "lfg_status") {
+      return [
+        Number(event.batchTotal || 0),
+        Array.isArray(event.members) ? event.members.length : 0,
+        String(event.payload || "").length,
+        Number(event.sequence || 0),
+        Number(event.capturedAtMs || 0),
+      ];
+    }
+
+    return [
+      String(event.payload || "").length,
+      Number(event.sequence || 0),
+      Number(event.capturedAtMs || 0),
+      0,
+      0,
+    ];
+  }
+
+  function comparePassiveLogicalEventScore(left, right) {
+    const leftScore = getPassiveLogicalEventScore(left);
+    const rightScore = getPassiveLogicalEventScore(right);
+    const length = Math.max(leftScore.length, rightScore.length);
+    for (let index = 0; index < length; index += 1) {
+      const delta = Number(rightScore[index] || 0) - Number(leftScore[index] || 0);
+      if (delta !== 0) {
+        return delta;
+      }
+    }
+
+    return compareAddonEvents(left, right);
+  }
+
+  function collapsePassiveLogicalEvents(events) {
+    const collapsed = new Map();
+    for (const event of events || []) {
+      const key = buildPassiveLogicalEventKey(event);
+      if (!key) {
+        continue;
+      }
+
+      const existing = collapsed.get(key);
+      if (!existing || comparePassiveLogicalEventScore(existing, event) > 0) {
+        collapsed.set(key, event);
+      }
+    }
+
+    return [...collapsed.values()].sort(compareAddonEvents);
+  }
+
   function parsePassiveLiveBrokerEvents(passiveBridge, passiveLiveFeedState) {
     if (!passiveBridge || passiveBridge.enabled !== true || !passiveLiveFeedState) {
       return {
@@ -1726,7 +1799,7 @@ async function createDashboardServer(options = {}) {
 
     return {
       activeSessionId,
-      events: sessionScopedEvents.sort(compareAddonEvents),
+      events: collapsePassiveLogicalEvents(sessionScopedEvents),
     };
   }
 

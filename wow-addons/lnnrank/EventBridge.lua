@@ -164,6 +164,59 @@ local function cloneArray(values)
     return result
 end
 
+local function estimateLfgStatusPayloadLength(region, heartbeatId, batchIndex, batchTotal, members)
+    local bridge = getEventBridgeTable()
+    local sequence = (type(bridge.sequence) == "number" and bridge.sequence or 0) + 1
+    local sessionId = sanitizeSegment(getSessionId(), 20)
+    local channelName = sanitizeSegment(getChannelName(), 30)
+    local sequenceText = tostring(sequence)
+    local eventId = sanitizeSegment(buildEventId(sessionId, sequence), 32)
+    local timestampText = tostring(getNowUnixMs())
+    local heartbeatText = sanitizeSegment(heartbeatId, 24)
+    local regionText = sanitizeSegment(region or "us", 8)
+    local batchIndexText = tostring(batchIndex or 0)
+    local batchTotalText = tostring(batchTotal or 0)
+
+    local length = #PAYLOAD_PREFIX
+    local function addSegment(key, value)
+        if value == nil or value == "" then
+            return
+        end
+        length = length + 1 + #key + 1 + #tostring(value)
+    end
+
+    addSegment("v", "2")
+    addSegment("e", "lfg_status")
+    addSegment("id", eventId)
+    addSegment("ch", channelName)
+    addSegment("ss", sessionId)
+    addSegment("n", sequenceText)
+    addSegment("t", timestampText)
+    addSegment("rg", regionText)
+    addSegment("sr", "lfg-status")
+    addSegment("hb", heartbeatText)
+    addSegment("ix", batchIndexText)
+    addSegment("tt", batchTotalText)
+
+    local memberLength = 0
+    if type(members) == "table" and #members > 0 then
+        for index = 1, #members do
+            local token = buildHeartbeatMemberToken(members[index])
+            if token and token ~= "" then
+                if memberLength > 0 then
+                    memberLength = memberLength + 1
+                end
+                memberLength = memberLength + #token
+            end
+        end
+        addSegment("m", memberLength > 0 and string.rep("x", memberLength) or "_")
+    else
+        addSegment("m", "_")
+    end
+
+    return length
+end
+
 local function encodeEventPayload(event)
     local segments = {
         PAYLOAD_PREFIX,
@@ -349,9 +402,8 @@ function addon.PublishLfgStatusSnapshot(region, members)
     for index = 1, #memberEntries do
         local candidateChunk = cloneArray(currentChunk)
         table.insert(candidateChunk, memberEntries[index])
-        local candidateEvent = buildLfgStatusEvent(region, heartbeatId, 1, 1, candidateChunk)
-        local candidatePayload = encodeEventPayload(candidateEvent)
-        if #candidatePayload > MAX_PASSIVE_PAYLOAD_LENGTH and #currentChunk > 0 then
+        local candidatePayloadLength = estimateLfgStatusPayloadLength(region, heartbeatId, 1, 1, candidateChunk)
+        if candidatePayloadLength > MAX_PASSIVE_PAYLOAD_LENGTH and #currentChunk > 0 then
             table.insert(chunks, currentChunk)
             currentChunk = {memberEntries[index]}
         else

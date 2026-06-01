@@ -8,6 +8,22 @@ local scanFrame = CreateFrame("Frame")
 local scanScheduled = false
 local APPLICANT_HEARTBEAT_SECONDS = 1
 
+local function isFrameShown(frame)
+    return frame and type(frame.IsShown) == "function" and frame:IsShown()
+end
+
+local function isApplicantHeartbeatContextActive()
+    if not isFrameShown(GroupFinderFrame) or not LFGListFrame or not LFGListFrame.ApplicationViewer then
+        return false
+    end
+
+    if LFGListFrame.activePanel == LFGListFrame.ApplicationViewer then
+        return true
+    end
+
+    return isFrameShown(LFGListFrame.ApplicationViewer)
+end
+
 local function splitFullName(fullName)
     if type(fullName) ~= "string" or fullName == "" then
         return nil, nil
@@ -478,10 +494,11 @@ local function collectApplicants()
     local applicantGroups = {}
     local applicantGroupsById = {}
     local heartbeatMembers = {}
+    local heartbeatContextActive = isApplicantHeartbeatContextActive()
 
     if (type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance()) or
         not addon.ShouldScanApplicants() or type(C_LFGList) ~= "table" or type(C_LFGList.GetApplicants) ~= "function" then
-        if type(addon.PublishLfgStatusSnapshot) == "function" and
+        if type(addon.PublishLfgStatusSnapshot) == "function" and heartbeatContextActive and
             not (type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance()) then
             addon.PublishLfgStatusSnapshot(region, heartbeatMembers)
         end
@@ -554,7 +571,7 @@ local function collectApplicants()
         end
     end
 
-    if type(addon.PublishLfgStatusSnapshot) == "function" then
+    if type(addon.PublishLfgStatusSnapshot) == "function" and (#heartbeatMembers > 0 or heartbeatContextActive) then
         addon.PublishLfgStatusSnapshot(region, heartbeatMembers)
     end
     addon.PruneQueuedRequestsBySource("applicant", entries)

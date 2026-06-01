@@ -2042,6 +2042,106 @@ test("dashboard applies grouped LFG heartbeat batches from passive live events",
   }
 });
 
+test("dashboard collapses duplicate logical LFG heartbeat parts before applying live state", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-lfg-heartbeat-collapse-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const eventTimestampMs = Date.now();
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44941",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    events: [
+      {
+        key: "fake-heartbeat-part-1",
+        kind: "payload",
+        preview: `LNNRANK|v=2|e=lfg_status|id=fake-1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=812|t=${eventTimestampMs}|rg=us|sr=lfg-status|hb=${eventTimestampMs}|ix=1|tt=1|m=Clickedone~Stormrage~g11~1,Queuedtwo~Thrall~g11~2`,
+        eventAt: new Date(eventTimestampMs).toISOString(),
+      },
+      {
+        key: "real-heartbeat-part-1",
+        kind: "payload",
+        preview: `LNNRANK|v=2|e=lfg_status|id=real-1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=813|t=${eventTimestampMs}|rg=us|sr=lfg-status|hb=${eventTimestampMs}|ix=1|tt=2|m=Clickedone~Stormrage~g11~1,Queuedtwo~Thrall~g11~2`,
+        eventAt: new Date(eventTimestampMs).toISOString(),
+      },
+      {
+        key: "real-heartbeat-part-2",
+        kind: "payload",
+        preview: `LNNRANK|v=2|e=lfg_status|id=real-2|ch=lnnrank0ff24cf4|ss=f24cf44941|n=814|t=${eventTimestampMs}|rg=us|sr=lfg-status|hb=${eventTimestampMs}|ix=2|tt=2|m=Thirdone~Area52~g12~1`,
+        eventAt: new Date(eventTimestampMs).toISOString(),
+      },
+    ],
+  };
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+    testHooks,
+  });
+
+  try {
+    const snapshot = testHooks.snapshotState();
+    assert.equal(snapshot.applicants.length, 3);
+    assert.deepEqual(
+      snapshot.applicants.map((entry) => `${entry.characterName}-${entry.realm}:${entry.groupID}`),
+      ["Clickedone-Stormrage:11", "Queuedtwo-Thrall:11", "Thirdone-Area52:12"]
+    );
+    assert.equal(snapshot.passiveLiveFeed.events.length, 2);
+    assert.deepEqual(
+      snapshot.passiveLiveFeed.events.map((entry) => entry.id),
+      ["real-1", "real-2"]
+    );
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
 test("dashboard auto sync recovers after an earlier queue-empty skip", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-"));
   const accountRoot = path.join(tempDir, "Account");
