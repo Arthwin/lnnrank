@@ -1959,6 +1959,273 @@ test("dashboard broker does not redeliver identical passive events across snapsh
   }
 });
 
+test("dashboard server retains live LFG applicants across heartbeat gaps until an explicit clear arrives", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-lfg-retain-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const eventTimestampMs = Date.parse("2026-06-01T12:00:00.000Z");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44941",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    entries: [],
+    events: [
+      {
+        key: "event-lfg-heartbeat-gap-1",
+        kind: "payload",
+        preview: `LNNRANK|v=2|e=lfg_status|id=hb-gap-1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=812|t=${eventTimestampMs}|rg=us|sr=lfg-status|hb=${eventTimestampMs}|ix=1|tt=1|m=Clickedone~Stormrage~g11~1,Queuedtwo~Thrall~g12~1`,
+        eventAt: new Date(eventTimestampMs).toISOString(),
+      },
+    ],
+  };
+
+  const testHooks = {};
+  const realDateNow = Date.now;
+  Date.now = () => eventTimestampMs;
+
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+    testHooks,
+  });
+
+  try {
+    const firstSnapshot = testHooks.snapshotState();
+    assert.equal(firstSnapshot.applicants.length, 2);
+
+    Date.now = () => eventTimestampMs + 60_000;
+    const secondSnapshot = testHooks.snapshotState();
+    assert.equal(secondSnapshot.applicants.length, 2);
+    assert.deepEqual(
+      secondSnapshot.applicants.map((entry) => `${entry.characterName}-${entry.realm}`),
+      ["Clickedone-Stormrage", "Queuedtwo-Thrall"]
+    );
+  } finally {
+    Date.now = realDateNow;
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("dashboard server surfaces groups from partial live LFG heartbeat batches", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-lfg-partial-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const eventTimestampMs = Date.now();
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44941",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    events: [
+      {
+        key: "partial-lfg-heartbeat-2",
+        kind: "payload",
+        preview: `LNNRANK|v=2|e=lfg_status|id=hb-partial-2|ch=lnnrank0ff24cf4|ss=f24cf44941|n=812|t=${eventTimestampMs}|rg=us|sr=lfg-status|hb=${eventTimestampMs}|ix=2|tt=2|m=Swank~KelThuzad~g102~1,Aintof~Zuljin~g99~1`,
+        eventAt: new Date(eventTimestampMs).toISOString(),
+      },
+    ],
+  };
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+    testHooks,
+  });
+
+  try {
+    const snapshot = testHooks.snapshotState();
+    assert.equal(snapshot.applicants.length, 2);
+    assert.deepEqual(
+      snapshot.applicants.map((entry) => `${entry.characterName}-${entry.realm}:${entry.groupID}`),
+      ["Aintof-Zuljin:99", "Swank-KelThuzad:102"]
+    );
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("dashboard server prefers current live entries over stale passive event history", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-live-entries-first-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const staleTimestampMs = Date.parse("2026-06-01T11:59:00.000Z");
+  const liveTimestampMs = Date.parse("2026-06-01T12:00:00.000Z");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44941",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    entries: [
+      {
+        key: "entry-live-current",
+        kind: "payload",
+        preview: `LNNRANK|v=2|e=lfg_status|id=entry-live-current|ch=lnnrank0ff24cf4|ss=f24cf44941|n=812|t=${liveTimestampMs}|rg=us|sr=lfg-status|hb=${liveTimestampMs}|ix=1|tt=1|m=Clickedone~Stormrage~g11~1,Queuedtwo~Thrall~g12~1`,
+        eventAt: new Date(liveTimestampMs).toISOString(),
+      },
+    ],
+    events: [
+      {
+        key: "event-stale-clear",
+        kind: "payload",
+        preview: `LNNRANK|v=2|e=lfg_status|id=event-stale-clear|ch=lnnrank0ff24cf4|ss=f24cf44941|n=700|t=${staleTimestampMs}|rg=us|sr=lfg-status|hb=${staleTimestampMs}|ix=0|tt=0`,
+        eventAt: new Date(staleTimestampMs).toISOString(),
+      },
+    ],
+  };
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+    testHooks,
+  });
+
+  try {
+    const snapshot = testHooks.snapshotState();
+    assert.equal(snapshot.applicants.length, 2);
+    assert.deepEqual(
+      snapshot.applicants.map((entry) => `${entry.characterName}-${entry.realm}`),
+      ["Clickedone-Stormrage", "Queuedtwo-Thrall"]
+    );
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
 test("dashboard applies grouped LFG heartbeat batches from passive live events", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-lfg-heartbeat-"));
   const accountRoot = path.join(tempDir, "Account");

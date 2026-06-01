@@ -223,10 +223,10 @@ function parsePassivePayload(payload) {
 }
 
 function getPassiveLiveSourceEntries(passiveLiveFeedState) {
-  if (passiveLiveFeedState && Array.isArray(passiveLiveFeedState.events) && passiveLiveFeedState.events.length > 0) {
-    return passiveLiveFeedState.events;
+  if (passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) && passiveLiveFeedState.entries.length > 0) {
+    return passiveLiveFeedState.entries;
   }
-  return passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [];
+  return passiveLiveFeedState && Array.isArray(passiveLiveFeedState.events) ? passiveLiveFeedState.events : [];
 }
 
 function parsePassiveLiveEntries(passiveLiveFeedState) {
@@ -1450,6 +1450,41 @@ async function createDashboardServer(options = {}) {
     rebuildLfgRuntimeEntries();
   }
 
+  function mergeLfgHeartbeatBatchIntoActiveGroups(publisherKey, heartbeatId) {
+    const publisherState = getLfgPublisherState(publisherKey);
+    const batch = publisherState.pendingHeartbeats.get(heartbeatId);
+    if (!batch) {
+      return;
+    }
+
+    const ignoreBeforeMs = Math.max(Number(lfgRuntime.ignoreBeforeMs || 0), Number(publisherState.latestAppliedAtMs || 0));
+    if (Number(batch.capturedAtMs || 0) < ignoreBeforeMs) {
+      return;
+    }
+
+    let changed = false;
+    for (const [groupKey, group] of batch.groups.entries()) {
+      const currentGroup = publisherState.activeGroups.get(groupKey);
+      if (!currentGroup || Number(currentGroup.capturedAtMs || 0) <= Number(group.capturedAtMs || 0)) {
+        publisherState.activeGroups.set(groupKey, {
+          groupID: group.groupID,
+          capturedAtMs: group.capturedAtMs,
+          members: Array.isArray(group.members) ? [...group.members] : [],
+        });
+        changed = true;
+      }
+    }
+
+    publisherState.latestAppliedAtMs = Math.max(Number(publisherState.latestAppliedAtMs || 0), Number(batch.capturedAtMs || 0));
+    publisherState.lastHeartbeatAtMs = Math.max(Number(publisherState.lastHeartbeatAtMs || 0), Number(batch.capturedAtMs || 0));
+    publisherState.transport = batch.transport || publisherState.transport || null;
+    lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, publisherState.latestAppliedAtMs);
+
+    if (changed) {
+      rebuildLfgRuntimeEntries();
+    }
+  }
+
   function processLfgStatusEvent(event) {
     if (!event || event.eventType !== "lfg_status" || Number(event.capturedAtMs || 0) < Number(lfgRuntime.ignoreBeforeMs || 0)) {
       return;
@@ -1526,6 +1561,7 @@ async function createDashboardServer(options = {}) {
     }
 
     publisherState.pendingHeartbeats.set(heartbeatId, batch);
+    mergeLfgHeartbeatBatchIntoActiveGroups(publisherKey, heartbeatId);
     if (batch.parts.size >= batch.totalParts) {
       applyLfgHeartbeatBatch(publisherKey, heartbeatId);
     }
@@ -1566,23 +1602,41 @@ async function createDashboardServer(options = {}) {
   }
 
   function expireStaleLfgState(nowMs = Date.now()) {
-    const heartbeatTtlMs = 10000;
+    const pendingHeartbeatTtlMs = 15000;
     let changed = false;
     for (const publisherState of lfgRuntime.publishers.values()) {
-      if (
-        publisherState.activeGroups.size > 0 &&
-        publisherState.transport === "passive-live" &&
-        Number(publisherState.lastHeartbeatAtMs || 0) > 0 &&
-        nowMs - Number(publisherState.lastHeartbeatAtMs || 0) > heartbeatTtlMs
-      ) {
-        publisherState.activeGroups.clear();
-        publisherState.pendingHeartbeats.clear();
-        changed = true;
+      for (const [heartbeatId, batch] of publisherState.pendingHeartbeats.entries()) {
+        if (nowMs - Number(batch && batch.capturedAtMs || 0) > pendingHeartbeatTtlMs) {
+          publisherState.pendingHeartbeats.delete(heartbeatId);
+          changed = true;
+        }
       }
     }
 
     if (changed) {
       rebuildLfgRuntimeEntries();
+    }
+  }
+
+  function rebuildLiveLfgRuntimeFromCurrentEvents(events, passiveSessionId = null) {
+    if (!Array.isArray(events) || events.length <= 0) {
+      return;
+    }
+
+    resetLfgRuntimeState();
+    if (passiveSessionId != null) {
+      lfgRuntime.passiveSessionKey = passiveSessionId;
+    }
+
+    for (const event of [...events].sort(compareAddonEvents)) {
+      if (event.eventType === "lfg_status") {
+        processLfgStatusEvent(event);
+        continue;
+      }
+
+      if (isLegacyApplicantSearchEvent(event)) {
+        processLegacyApplicantLfgEvent(event);
+      }
     }
   }
 
@@ -1770,8 +1824,8 @@ async function createDashboardServer(options = {}) {
       };
     }
 
-    const liveEntries = getPassiveLiveSourceEntries(passiveLiveFeedState);
-    const parsedEvents = liveEntries
+    const parsePassivePayloadList = (items) =>
+      (items || [])
       .filter((entry) => entry && entry.kind === "payload" && typeof entry.preview === "string")
       .map((entry) =>
         parseAddonEventPayload(entry.preview, {
@@ -1782,20 +1836,83 @@ async function createDashboardServer(options = {}) {
       )
       .filter(Boolean);
 
+    const parsedEntryEvents = parsePassivePayloadList(
+      passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : []
+    );
+    const parsedHistoryEvents = parsePassivePayloadList(
+      passiveLiveFeedState && Array.isArray(passiveLiveFeedState.events) ? passiveLiveFeedState.events : []
+    );
+
     const channelName = passiveBridge.channelName || null;
-    const channelScopedEvents = channelName
-      ? parsedEvents.filter((event) => event.channelName === channelName)
-      : parsedEvents;
+    const channelScopedEntryEvents = channelName
+      ? parsedEntryEvents.filter((event) => event.channelName === channelName)
+      : parsedEntryEvents;
+    const channelScopedHistoryEvents = channelName
+      ? parsedHistoryEvents.filter((event) => event.channelName === channelName)
+      : parsedHistoryEvents;
     const preferredSessionId = passiveBridge.sessionId || null;
-    const latestChannelEvent =
-      channelScopedEvents.length > 0
-        ? [...channelScopedEvents].sort(compareAddonEvents)[channelScopedEvents.length - 1]
-        : null;
-    const activeSessionId =
-      (latestChannelEvent && latestChannelEvent.sessionId) || preferredSessionId;
+
+    const latestEventForSession = (events, sessionId) => {
+      if (!sessionId) {
+        return null;
+      }
+      const sessionEvents = (events || []).filter((event) => event.sessionId === sessionId);
+      return sessionEvents.length > 0 ? [...sessionEvents].sort(compareAddonEvents)[sessionEvents.length - 1] : null;
+    };
+
+    const latestEventOverall = (events) =>
+      events && events.length > 0 ? [...events].sort(compareAddonEvents)[events.length - 1] : null;
+
+    let selectedEvents = channelScopedEntryEvents;
+    let activeSessionId = null;
+
+    const preferredEntryEvent = latestEventForSession(channelScopedEntryEvents, preferredSessionId);
+    const preferredHistoryEvent = latestEventForSession(channelScopedHistoryEvents, preferredSessionId);
+    const latestEntryEvent = latestEventOverall(channelScopedEntryEvents);
+    const latestHistoryEvent = latestEventOverall(channelScopedHistoryEvents);
+
+    if (preferredEntryEvent) {
+      const preferredEntryEventAtMs = Number(preferredEntryEvent.capturedAtMs || 0);
+      const latestEntryEventAtMs = Number((latestEntryEvent && latestEntryEvent.capturedAtMs) || 0);
+      const shouldPreferLatestEntrySession =
+        latestEntryEvent &&
+        latestEntryEvent.sessionId !== preferredSessionId &&
+        latestEntryEventAtMs - preferredEntryEventAtMs > 60 * 1000;
+
+      if (shouldPreferLatestEntrySession) {
+        activeSessionId = latestEntryEvent.sessionId || preferredSessionId;
+        selectedEvents = channelScopedEntryEvents;
+      } else {
+        activeSessionId = preferredSessionId;
+        selectedEvents = channelScopedEntryEvents;
+      }
+    } else if (latestEntryEvent) {
+      const latestEntryEventAtMs = Number(latestEntryEvent.capturedAtMs || 0);
+      const preferredHistoryEventAtMs = Number((preferredHistoryEvent && preferredHistoryEvent.capturedAtMs) || 0);
+      const shouldPreferHistorySession =
+        preferredHistoryEvent &&
+        latestEntryEvent.sessionId !== preferredSessionId &&
+        preferredHistoryEventAtMs > 0 &&
+        latestEntryEventAtMs - preferredHistoryEventAtMs <= 60 * 1000;
+
+      if (shouldPreferHistorySession) {
+        activeSessionId = preferredSessionId;
+        selectedEvents = channelScopedHistoryEvents;
+      } else {
+        activeSessionId = latestEntryEvent.sessionId || preferredSessionId;
+        selectedEvents = channelScopedEntryEvents;
+      }
+    } else if (preferredHistoryEvent) {
+      activeSessionId = preferredSessionId;
+      selectedEvents = channelScopedHistoryEvents;
+    } else {
+      activeSessionId = (latestHistoryEvent && latestHistoryEvent.sessionId) || preferredSessionId;
+      selectedEvents = channelScopedHistoryEvents;
+    }
+
     const sessionScopedEvents = activeSessionId
-      ? channelScopedEvents.filter((event) => event.sessionId === activeSessionId)
-      : channelScopedEvents;
+      ? selectedEvents.filter((event) => event.sessionId === activeSessionId)
+      : selectedEvents;
 
     return {
       activeSessionId,
@@ -1846,6 +1963,7 @@ async function createDashboardServer(options = {}) {
       clearLnnrankSavedVariablesEventBatch(savedVariablesSnapshot.file);
     }
 
+    rebuildLiveLfgRuntimeFromCurrentEvents(passiveLiveScope.events, passiveLiveScope.activeSessionId || null);
     expireStaleLfgState();
 
     return {
