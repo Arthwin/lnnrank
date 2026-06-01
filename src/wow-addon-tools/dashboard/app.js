@@ -982,10 +982,15 @@ function comparePassiveLogRecency(left, right) {
 }
 
 function getPassiveLogSourceEntries(liveFeed) {
-  if (liveFeed && Array.isArray(liveFeed.events) && liveFeed.events.length > 0) {
-    return liveFeed.events;
+  const events = liveFeed && Array.isArray(liveFeed.events) ? liveFeed.events : [];
+  const entries = liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
+  if (events.length === 0) {
+    return entries;
   }
-  return liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
+  if (entries.length === 0) {
+    return events;
+  }
+  return [...events, ...entries];
 }
 
 function resolvePassivePayloadSortAt(entry, parsed) {
