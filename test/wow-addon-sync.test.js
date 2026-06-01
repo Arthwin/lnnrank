@@ -1335,6 +1335,92 @@ test("dashboard server prefers timestamped passive events over stale memory entr
   }
 });
 
+test("dashboard server exposes the active live passive session from brokered events", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-active-passive-session-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44635",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
+    passiveLiveFeedStateOverride: {
+      supported: true,
+      status: "ready",
+      events: [
+        {
+          key: "event-appclear",
+          kind: "payload",
+          preview: "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf48076|n=436|rg=us|re=Stormrage|nm=Urmomgargles|sr=appclear|t=1780288333000",
+          eventAt: "2026-06-01T04:32:13.000Z",
+        },
+        {
+          key: "event-applicant",
+          kind: "payload",
+          preview: "LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf48076|n=441|rg=us|re=Mannoroth|nm=Bizaremix|sr=applicant|ai=111|gi=111|mi=1|ar=DAMAGER|cl=DEATHKNIGHT|il=284.1|lv=90|t=1780288339000",
+          eventAt: "2026-06-01T04:32:19.000Z",
+        },
+      ],
+    },
+    testHooks,
+  });
+
+  try {
+    const state = testHooks.snapshotState();
+    assert.equal(state.passiveBridge.sessionId, "f24cf44635");
+    assert.equal(state.passiveLiveFeed.activeSessionId, "f24cf48076");
+    assert.equal(state.passiveLiveFeed.events.length, 2);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
 test("clear LFG advances the passive event cursor so older live events stay ignored", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-clear-cursor-"));
   const accountRoot = path.join(tempDir, "Account");

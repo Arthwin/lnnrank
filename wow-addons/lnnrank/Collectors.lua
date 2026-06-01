@@ -6,7 +6,7 @@ end
 
 local scanFrame = CreateFrame("Frame")
 local scanScheduled = false
-local APPLICANT_HEARTBEAT_SECONDS = 3
+local APPLICANT_HEARTBEAT_SECONDS = 1
 
 local function splitFullName(fullName)
     if type(fullName) ~= "string" or fullName == "" then

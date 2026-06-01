@@ -16,6 +16,21 @@ const SOURCE_LABELS = {
   raid: "Raid snapshot",
   party: "Party snapshot",
 };
+const WOW_CLASS_COLORS = {
+  DEATHKNIGHT: "#C41E3A",
+  DEMONHUNTER: "#A330C9",
+  DRUID: "#FF7C0A",
+  EVOKER: "#33937F",
+  HUNTER: "#AAD372",
+  MAGE: "#3FC7EB",
+  MONK: "#00FF98",
+  PALADIN: "#F48CBA",
+  PRIEST: "#FFFFFF",
+  ROGUE: "#FFF468",
+  SHAMAN: "#0070DD",
+  WARLOCK: "#8788EE",
+  WARRIOR: "#C69B6D",
+};
 
 const SPEC_ROLE_MAP = {
   "Affliction": "dps",
@@ -84,6 +99,18 @@ function formatDate(value) {
   }
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function normalizeWowClassToken(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s_-]+/gu, "");
+}
+
+function resolveWowClassColor(value) {
+  const token = normalizeWowClassToken(value);
+  return token ? WOW_CLASS_COLORS[token] || null : null;
 }
 
 function formatShortDate(value) {
@@ -815,6 +842,8 @@ function renderResults(data) {
       const roleLabel = createRoleLabelMarkup(resolveRoleForCharacter(record), "results-role-icon");
       const averageParse = getRecordAverageParse(record);
       const blendedPercent = getRecordBlendedPercent(record, averageParse);
+      const classColor = resolveWowClassColor(record.className);
+      const nameStyle = classColor ? ` style="color: ${escapeHtml(classColor)}"` : "";
       const locationParts = [record.realm];
       if (record.region) {
         locationParts.push(`(${String(record.region).toUpperCase()})`);
@@ -823,7 +852,7 @@ function renderResults(data) {
         <tr>
           <td>
             <div class="results-character-cell">
-              <a class="wcl-character-link results-name-link" href="${escapeHtml(buildWclCharacterUrl(record))}" target="_blank" rel="noreferrer noopener">${escapeHtml(record.name)}</a>
+              <a class="wcl-character-link results-name-link" href="${escapeHtml(buildWclCharacterUrl(record))}" target="_blank" rel="noreferrer noopener"${nameStyle}>${escapeHtml(record.name)}</a>
               ${roleLabel ? `<div class="results-role-meta">${roleLabel}</div>` : ""}
               <div class="results-location-meta">${escapeHtml(locationParts.join(" "))}</div>
             </div>
@@ -887,22 +916,40 @@ function formatPassiveLiveStatus(liveFeed) {
 }
 
 function parsePassivePayloadEnvelope(payload) {
-  const match = String(payload || "").match(
-    /^LNNRANK\|ch=([^|]+)\|ss=([^|]*)\|n=(\d+)\|rg=([^|]+)\|re=([^|]+)\|nm=([^|]+)\|sr=([^|]+)(?:\|.*)?$/u
-  );
-  if (!match) {
+  const text = String(payload || "").trim();
+  if (!text.startsWith("LNNRANK|")) {
     return null;
   }
 
-  const [, channelName, sessionId, sequence, region, realm, characterName, source] = match;
+  const fields = {};
+  for (const segment of text.split("|").slice(1)) {
+    const separatorIndex = segment.indexOf("=");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = segment.slice(0, separatorIndex);
+    const value = segment.slice(separatorIndex + 1);
+    if (!key || value === "") {
+      continue;
+    }
+    fields[key] = value;
+  }
+
+  if (!fields.ch || !fields.n || !fields.rg || !fields.re || !fields.nm || !fields.sr) {
+    return null;
+  }
+
+  const timestampMs = Number.parseInt(fields.t || "", 10);
   return {
-    channelName,
-    sessionId,
-    sequence: Number.parseInt(sequence, 10) || 0,
-    region,
-    realm,
-    characterName,
-    source,
+    channelName: fields.ch,
+    sessionId: fields.ss || "",
+    sequence: Number.parseInt(fields.n, 10) || 0,
+    region: fields.rg,
+    realm: fields.re,
+    characterName: fields.nm,
+    source: fields.sr,
+    timestampMs: Number.isFinite(timestampMs) && timestampMs > 0 ? timestampMs : null,
   };
 }
 
@@ -941,7 +988,26 @@ function getPassiveLogSourceEntries(liveFeed) {
   return liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
 }
 
+function resolvePassivePayloadSortAt(entry, parsed) {
+  const timestampMs = Number(parsed && parsed.timestampMs);
+  if (Number.isFinite(timestampMs) && timestampMs > 0) {
+    return new Date(timestampMs).toISOString();
+  }
+
+  return (
+    (entry && entry.eventAt) ||
+    (entry && entry.firstSeenAt) ||
+    (entry && entry.lastSeenAt) ||
+    (entry && entry.publishedAtIso) ||
+    null
+  );
+}
+
 function resolveVisiblePassiveSession(passive, liveFeed) {
+  if (liveFeed && liveFeed.activeSessionId) {
+    return liveFeed.activeSessionId;
+  }
+
   const candidates = [];
   const liveEntries = getPassiveLogSourceEntries(liveFeed);
 
@@ -958,7 +1024,7 @@ function resolveVisiblePassiveSession(passive, liveFeed) {
     candidates.push({
       source: parsed.source,
       sessionId: parsed.sessionId,
-      sortAt: entry.lastSeenAt || entry.firstSeenAt || null,
+      sortAt: resolvePassivePayloadSortAt(entry, parsed),
       sequence: parsed.sequence,
     });
   }
@@ -1026,7 +1092,7 @@ function buildPassiveLogEntries(passive, liveFeed) {
 
     upsertEntry(`payload:${entry.preview}`, {
       id: `payload:${entry.preview}`,
-      sortAt: entry.firstSeenAt || entry.lastSeenAt || null,
+      sortAt: resolvePassivePayloadSortAt(entry, parsed),
       title: [parsed.characterName, parsed.realm].filter(Boolean).join("-") || "Unknown character",
       source: formatSourceLabel(parsed.source),
       sequence: parsed.sequence,
@@ -1052,7 +1118,7 @@ function buildPassiveLogEntries(passive, liveFeed) {
     }
     upsertEntry(`payload:${entry.payload}`, {
       id: `payload:${entry.payload}`,
-      sortAt: entry.publishedAtIso || null,
+      sortAt: resolvePassivePayloadSortAt(entry, parsed),
       title:
         parsed && parsed.characterName && parsed.realm
           ? `${parsed.characterName}-${parsed.realm}`
@@ -1318,6 +1384,9 @@ function renderLfgMemberRow(entry, data) {
     averageParse == null ? "" : `${formatCompactNumber(Math.round(averageParse), 0)}%`;
   const averageParseClass = toneClassForParsePercent(averageParse);
   const nameToneClass = toneClassForBlendedPerformance(record, averageParse);
+  const classColor = resolveWowClassColor((record && record.className) || entry.class);
+  const nameStyle = classColor ? ` style="color: ${escapeHtml(classColor)}"` : "";
+  const nameClassAttr = classColor ? "" : ` class="${escapeHtml(nameToneClass)}"`;
   const regionInfo = entry.region ? String(entry.region).toUpperCase() : "";
   const summaryParts = [];
 
@@ -1347,7 +1416,7 @@ function renderLfgMemberRow(entry, data) {
               specName: record && record.specName,
               assignedRole: entry.assignedRole,
               role: record && record.role,
-            }))}" target="_blank" rel="noreferrer noopener"><strong class="${escapeHtml(nameToneClass)}">${escapeHtml(entry.characterName)}</strong></a>
+            }))}" target="_blank" rel="noreferrer noopener"><strong${nameClassAttr}${nameStyle}>${escapeHtml(entry.characterName)}</strong></a>
             <span class="lfg-member-server">- ${escapeHtml(entry.realm)}</span>
             ${regionInfo ? `<span class="lfg-member-region">${escapeHtml(regionInfo)}</span>` : ""}
           </div>

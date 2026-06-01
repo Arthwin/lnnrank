@@ -866,13 +866,14 @@ async function createDashboardServer(options = {}) {
     );
   }
 
-  function buildBrokeredPassiveLiveFeedState(rawState) {
+  function buildBrokeredPassiveLiveFeedState(rawState, passiveLiveScope) {
     if (!rawState) {
       return null;
     }
 
     return {
       ...rawState,
+      activeSessionId: passiveLiveScope && passiveLiveScope.sessionId ? passiveLiveScope.sessionId : null,
       events: [...passiveBrokerRuntime.events],
       eventCount: passiveBrokerRuntime.events.length,
     };
@@ -1067,12 +1068,11 @@ async function createDashboardServer(options = {}) {
   }
 
   function syncPassiveEventBroker(passiveBridge, passiveLiveFeedState) {
-    const brokeredLiveFeedState = buildBrokeredPassiveLiveFeedState(passiveLiveFeedState);
     if (!passiveBridge || passiveBridge.enabled !== true) {
       return {
         sessionKey: null,
         events: [],
-        passiveLiveFeedState: brokeredLiveFeedState,
+        passiveLiveFeedState: buildBrokeredPassiveLiveFeedState(passiveLiveFeedState, null),
         passiveLiveQueue: listPassiveQueueRuntimeEntries(),
       };
     }
@@ -1102,7 +1102,7 @@ async function createDashboardServer(options = {}) {
     return {
       sessionKey: passiveSessionKey,
       events: flushedEvents,
-      passiveLiveFeedState: buildBrokeredPassiveLiveFeedState(passiveLiveFeedState),
+      passiveLiveFeedState: buildBrokeredPassiveLiveFeedState(passiveLiveFeedState, passiveLiveScope),
       passiveLiveQueue: listPassiveQueueRuntimeEntries(),
     };
   }
