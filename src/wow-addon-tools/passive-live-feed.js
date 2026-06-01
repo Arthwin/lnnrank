@@ -363,7 +363,6 @@ function createPassiveLiveFeedMonitor(options = {}) {
     discoveryAddresses: [],
     entries: [],
     events: [],
-    lastSearchStartedAtMs: 0,
     currentPromise: null,
   };
 
@@ -379,24 +378,15 @@ function createPassiveLiveFeedMonitor(options = {}) {
     state.discoveryAddresses = [];
     state.entries = [];
     state.events = [];
-    state.lastSearchStartedAtMs = 0;
     state.status = channelName ? "idle" : "waiting";
   }
 
-  function mergeEntries(nextEntries, observedAtIso, previousSearchStartedAtMs) {
+  function mergeEntries(nextEntries, observedAtIso) {
     const merged = new Map(state.entries.map((entry) => [entry.key, entry]));
     const newEvents = [];
     for (const entry of nextEntries) {
       const payloadTimestampMs =
         entry.kind === "payload" && typeof entry.preview === "string" ? extractPayloadTimestampMs(entry.preview) : null;
-      if (
-        payloadTimestampMs != null &&
-        Number.isFinite(previousSearchStartedAtMs) &&
-        previousSearchStartedAtMs > 0 &&
-        payloadTimestampMs < previousSearchStartedAtMs
-      ) {
-        continue;
-      }
 
       const eventAtIso =
         payloadTimestampMs != null && payloadTimestampMs > 0 ? new Date(payloadTimestampMs).toISOString() : observedAtIso;
@@ -507,8 +497,6 @@ function createPassiveLiveFeedMonitor(options = {}) {
     state.status = "scanning";
     state.lastError = null;
     const scanStartedAt = Date.now();
-    const previousSearchStartedAtMs = state.lastSearchStartedAtMs;
-    state.lastSearchStartedAtMs = scanStartedAt;
 
     const run = (async () => {
       const wowProcess = await detectWowProcess();
@@ -539,7 +527,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
           });
       const observedAtIso = new Date().toISOString();
       const nextEntries = extractPassiveLiveFeedEntries(result);
-      mergeEntries(nextEntries, observedAtIso, previousSearchStartedAtMs);
+      mergeEntries(nextEntries, observedAtIso);
       if (shouldRediscover || !state.discoveryAddresses.length) {
         state.discoveryAddresses = selectPassiveAddressCandidates(result);
         state.lastDiscoveredAt = observedAtIso;
