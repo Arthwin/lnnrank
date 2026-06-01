@@ -66,11 +66,7 @@ local function buildPassivePlayerKey()
 end
 
 local function buildPassiveChannelName()
-    if not passiveSessionId then
-        passiveSessionId = buildPassiveSessionId()
-    end
-
-    return string.format("lnnrank%s", passiveSessionId):sub(1, 30)
+    return string.format("lnnrank%s", buildPassivePlayerKey()):sub(1, 30)
 end
 
 local function hideChannelEverywhere(channelName)

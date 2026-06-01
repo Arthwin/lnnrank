@@ -33,7 +33,10 @@ const {
   buildUnifiedQueue,
   createDashboardServer,
 } = require("../src/wow-addon-tools/dashboard-server");
-const { extractPassiveLiveFeedEntries } = require("../src/wow-addon-tools/passive-live-feed");
+const {
+  buildPassiveDiscoveryPattern,
+  extractPassiveLiveFeedEntries,
+} = require("../src/wow-addon-tools/passive-live-feed");
 const {
   buildDevRuntimePaths,
   ensureDevRuntime,
@@ -573,6 +576,24 @@ test("live feed extraction preserves applicant metadata in canonical payloads", 
   );
 });
 
+test("live feed discovery pattern follows the active player channel across reload sessions", () => {
+  assert.equal(
+    buildPassiveDiscoveryPattern({
+      channelName: "lnnrankf24cf42583",
+      playerKey: "0ff24cf4",
+    }),
+    "lnnrankf24cf4"
+  );
+
+  assert.equal(
+    buildPassiveDiscoveryPattern({
+      channelName: "lnnrank0ff24cf4",
+      playerKey: "0ff24cf4",
+    }),
+    "lnnrank0ff24cf4"
+  );
+});
+
 test("dashboard state merges passive live applicant payloads into the queue and LFG view", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-passive-state-"));
   const accountRoot = path.join(tempDir, "Account");
@@ -714,6 +735,80 @@ test("dashboard state expires stale passive live applicants when live mode is ac
 
   assert.equal(state.queue.length, 0);
   assert.equal(state.applicants.length, 0);
+});
+
+test("dashboard state keeps saved snapshot applicants when live feed only has channel hits", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-passive-fallback-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {',
+      '    ["us:sargeras:helldivers"] = {',
+      '      ["region"] = "us",',
+      '      ["realm"] = "Sargeras",',
+      '      ["characterName"] = "Helldivers",',
+      '      ["source"] = "applicant",',
+      '      ["applicantID"] = 9,',
+      '      ["memberIndex"] = 1,',
+      '      ["assignedRole"] = "DAMAGER",',
+      '      ["lastSeenAt"] = 1780278425,',
+      "    },",
+      "  },",
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrankf24cf48417",',
+      '    ["playerKey"] = "0ff24cf4",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const state = buildDashboardState({
+    dbPath,
+    accountRoot,
+    passiveLiveFeedState: {
+      supported: true,
+      status: "ready",
+      entries: [
+        {
+          key: "lnnrankf24cf48378",
+          kind: "channel",
+          preview: "lnnrankf24cf48378",
+          firstSeenAt: "2026-06-01T01:47:26.532Z",
+          lastSeenAt: "2026-06-01T01:48:38.539Z",
+        },
+        {
+          key: "lnnrankf24cf48417",
+          kind: "channel",
+          preview: "lnnrankf24cf48417",
+          firstSeenAt: "2026-06-01T01:47:26.532Z",
+          lastSeenAt: "2026-06-01T01:48:38.539Z",
+        },
+      ],
+    },
+    nowMs: Date.parse("2026-06-01T01:48:39.429Z"),
+  });
+
+  assert.equal(state.queue.length, 0);
+  assert.equal(state.applicants.length, 1);
+  assert.equal(state.applicants[0].characterName, "Helldivers");
+  assert.equal(state.applicants[0].applicantID, 9);
 });
 
 test("dev runtime bootstraps an isolated dashboard sandbox inside the chosen root", () => {

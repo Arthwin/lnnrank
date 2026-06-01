@@ -295,12 +295,22 @@ function filterActivePassiveLiveQueue(passiveLiveQueue, nowMs) {
 }
 
 function shouldPreferLiveApplicants(passiveBridge, passiveLiveFeedState) {
+  const liveEntries =
+    passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [];
+  const hasApplicantPayload = liveEntries.some(
+    (entry) =>
+      entry &&
+      entry.kind === "payload" &&
+      typeof entry.preview === "string" &&
+      entry.preview.includes("|sr=applicant")
+  );
+
   return Boolean(
     passiveBridge &&
       passiveBridge.enabled === true &&
       passiveLiveFeedState &&
       passiveLiveFeedState.supported !== false &&
-      (passiveLiveFeedState.status === "ready" || passiveLiveFeedState.lastScannedAt)
+      hasApplicantPayload
   );
 }
 

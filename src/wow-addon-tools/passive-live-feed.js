@@ -295,15 +295,43 @@ function selectPassiveAddressCandidates(scanResult) {
     .map((entry) => `0x${entry.numericAddress.toString(16).toUpperCase("en-US")}`);
 }
 
+function normalizePassiveDiscoveryToken(value) {
+  return String(value || "")
+    .trim()
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]/gu, "");
+}
+
+function buildPassiveDiscoveryPattern(passiveBridge) {
+  const channelName = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.channelName);
+  const playerKey = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.playerKey);
+
+  if (channelName && playerKey && channelName.includes(playerKey)) {
+    return channelName;
+  }
+
+  if (playerKey.length >= 6) {
+    return `lnnrank${playerKey.slice(-6)}`;
+  }
+
+  if (channelName.startsWith("lnnrank") && channelName.length > "lnnrank".length + 4) {
+    return channelName.slice(0, -4);
+  }
+
+  return channelName || null;
+}
+
 function createPassiveLiveFeedMonitor(options = {}) {
   const scanIntervalMs = Math.max(
     1500,
     Number.parseInt(String(options.scanIntervalMs || DEFAULT_SCAN_INTERVAL_MS), 10) || DEFAULT_SCAN_INTERVAL_MS
   );
+  const discoveryRetryIntervalMs = Math.max(scanIntervalMs, 12000);
   const state = {
     supported: process.platform === "win32",
     status: "idle",
     channelName: null,
+    discoveryPattern: null,
     wowProcessId: null,
     lastScannedAt: null,
     lastError: null,
@@ -315,6 +343,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
 
   function resetForChannel(channelName) {
     state.channelName = channelName || null;
+    state.discoveryPattern = null;
     state.wowProcessId = null;
     state.lastScannedAt = null;
     state.lastError = null;
@@ -361,6 +390,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
       supported: state.supported,
       status: state.status,
       channelName: state.channelName,
+      discoveryPattern: state.discoveryPattern,
       wowProcessId: state.wowProcessId,
       lastScannedAt: state.lastScannedAt,
       lastError: state.lastError,
@@ -376,19 +406,22 @@ function createPassiveLiveFeedMonitor(options = {}) {
       passiveBridge && passiveBridge.enabled && passiveBridge.channelName
         ? String(passiveBridge.channelName).trim()
         : "";
+    const discoveryPattern =
+      passiveBridge && passiveBridge.enabled ? buildPassiveDiscoveryPattern(passiveBridge) : null;
 
     if (!state.supported) {
       state.status = "unsupported";
       return;
     }
 
-    if (!channelName) {
+    if (!channelName || !discoveryPattern) {
       resetForChannel(null);
       return;
     }
 
-    if (state.channelName !== channelName) {
+    if (state.channelName !== channelName || state.discoveryPattern !== discoveryPattern) {
       resetForChannel(channelName);
+      state.discoveryPattern = discoveryPattern;
     }
 
     if (state.currentPromise) {
@@ -396,7 +429,11 @@ function createPassiveLiveFeedMonitor(options = {}) {
     }
 
     const lastScanMs = Date.parse(state.lastScannedAt || "");
-    if (Number.isFinite(lastScanMs) && Date.now() - lastScanMs < scanIntervalMs) {
+    const activeIntervalMs =
+      Array.isArray(state.discoveryAddresses) && state.discoveryAddresses.length > 0
+        ? scanIntervalMs
+        : discoveryRetryIntervalMs;
+    if (Number.isFinite(lastScanMs) && Date.now() - lastScanMs < activeIntervalMs) {
       return null;
     }
 
@@ -424,12 +461,16 @@ function createPassiveLiveFeedMonitor(options = {}) {
             })
           : await discoverPassiveChannelMemory({
               processId: wowProcess.processId,
-              channelName,
+              channelName: discoveryPattern,
             });
       const observedAtIso = new Date().toISOString();
-      mergeEntries(extractPassiveLiveFeedEntries(result), observedAtIso);
+      const nextEntries = extractPassiveLiveFeedEntries(result);
+      mergeEntries(nextEntries, observedAtIso);
       if (!state.discoveryAddresses.length) {
         state.discoveryAddresses = selectPassiveAddressCandidates(result);
+      }
+      if (!nextEntries.some((entry) => entry.kind === "payload")) {
+        state.discoveryAddresses = [];
       }
       state.lastScannedAt = observedAtIso;
       state.scanDurationMs = Number(result && result.durationMs) || Date.now() - scanStartedAt;
@@ -459,6 +500,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
 }
 
 module.exports = {
+  buildPassiveDiscoveryPattern,
   createPassiveLiveFeedMonitor,
   extractCanonicalPayload,
   extractPassiveLiveFeedEntries,
