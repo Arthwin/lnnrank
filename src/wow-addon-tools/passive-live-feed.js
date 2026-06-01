@@ -166,6 +166,18 @@ function normalizeScanResult(result) {
   };
 }
 
+function extractCanonicalPayload(text) {
+  const match = String(text || "").match(
+    /LNNRANK\|ch=([A-Za-z0-9_:=.]{1,30})\|ss=([A-Za-z0-9_:=.]{1,20})\|n=(\d{1,10})\|rg=([A-Za-z0-9_:=.]{1,8})\|re=([A-Za-z0-9_:=.]{1,32})\|nm=([A-Za-z0-9_:=.]{1,32})\|sr=([A-Za-z0-9_]{1,16})/u
+  );
+  if (!match) {
+    return null;
+  }
+
+  const [, channelName, sessionId, sequence, region, realm, characterName, source] = match;
+  return `LNNRANK|ch=${channelName}|ss=${sessionId}|n=${sequence}|rg=${region}|re=${realm}|nm=${characterName}|sr=${source}`;
+}
+
 function extractPassiveLiveFeedEntries(scanResult) {
   const matches = Array.isArray(scanResult && scanResult.matches) ? scanResult.matches : [];
   const entries = [];
@@ -173,12 +185,12 @@ function extractPassiveLiveFeedEntries(scanResult) {
 
   for (const match of matches) {
     for (const preview of [match.previewUtf8, match.previewUtf16]) {
-      const text = String(preview || "").trim();
-      if (!text || (!text.includes("LNNRANK|") && !text.includes("lnnrank"))) {
+      const normalized = normalizePassivePreview(preview);
+      if (!normalized) {
         continue;
       }
 
-      const key = text;
+      const key = normalized.preview;
       if (seen.has(key)) {
         continue;
       }
@@ -188,13 +200,73 @@ function extractPassiveLiveFeedEntries(scanResult) {
         key,
         address: match.address,
         encoding: match.encoding,
-        kind: text.includes("LNNRANK|") ? "payload" : "channel",
-        preview: text,
+        kind: normalized.kind,
+        preview: normalized.preview,
       });
     }
   }
 
   return entries;
+}
+
+function trimAtNoiseBoundary(text) {
+  const value = String(text || "").trim();
+  if (!value) {
+    return "";
+  }
+
+  const match = value.match(/^(.*?)(?:\.{4,}| {3,}|$)/u);
+  return (match ? match[1] : value).trim();
+}
+
+function normalizePassivePreview(preview) {
+  const raw = String(preview || "").trim();
+  if (!raw || (!raw.includes("LNNRANK|") && !raw.includes("lnnrank"))) {
+    return null;
+  }
+
+  const payload = extractCanonicalPayload(raw);
+  if (payload) {
+    return {
+      kind: "payload",
+      preview: payload,
+    };
+  }
+
+  const plain = raw
+    .replace(/\|c[0-9A-Fa-f]{8}/gu, "")
+    .replace(/\|r/gu, "")
+    .replace(/\|Hchannel:channel:\d+\|h(\[[^\]]*lnnrank[^\]]+\])\|h/gu, "$1")
+    .replace(/\|Hplayer:([^:|]+):[^|]*\|h\[[^\]]+\]\|h/gu, "$1")
+    .replace(/\s+/gu, " ")
+    .trim();
+
+  const chatMatch = plain.match(/(?:\d{2}:\d{2}\s+)?(\[[^\]]*lnnrank[^\]]+\]\s+[^:]+:\s*.+)/u);
+  if (chatMatch) {
+    const message = trimAtNoiseBoundary(chatMatch[1]);
+    if (message) {
+      return {
+        kind: "chat",
+        preview: message,
+      };
+    }
+  }
+
+  const channelMatch = raw.match(/lnnrank[a-z0-9]+/iu);
+  if (channelMatch) {
+    return {
+      kind: "channel",
+      preview: channelMatch[0].toLowerCase(),
+    };
+  }
+
+  const fallback = trimAtNoiseBoundary(plain || raw);
+  return fallback
+    ? {
+        kind: "memory-hit",
+        preview: fallback,
+      }
+    : null;
 }
 
 function selectPassiveAddressCandidates(scanResult) {
@@ -390,6 +462,8 @@ function createPassiveLiveFeedMonitor(options = {}) {
 
 module.exports = {
   createPassiveLiveFeedMonitor,
+  extractCanonicalPayload,
   extractPassiveLiveFeedEntries,
+  normalizePassivePreview,
   selectPassiveAddressCandidates,
 };

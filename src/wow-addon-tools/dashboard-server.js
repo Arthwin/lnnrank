@@ -144,7 +144,159 @@ function normalizePassiveBridge(passiveBridge) {
   };
 }
 
-function buildUnifiedQueue(cache, savedQueue) {
+function normalizePassiveSource(source) {
+  const normalized = String(source || "").trim().toLocaleLowerCase("en-US");
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === "chatlink") {
+    return "chat-link";
+  }
+  return normalized;
+}
+
+function toUnixSecondsFromIso(value) {
+  const parsedMs = Date.parse(value || "");
+  return Number.isFinite(parsedMs) ? Math.floor(parsedMs / 1000) : null;
+}
+
+function parsePassivePayload(payload) {
+  if (typeof payload !== "string" || !payload.startsWith("LNNRANK|")) {
+    return null;
+  }
+
+  const fields = {};
+  for (const segment of payload.split("|").slice(1)) {
+    const separatorIndex = segment.indexOf("=");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = segment.slice(0, separatorIndex);
+    const value = segment.slice(separatorIndex + 1);
+    if (!key || !value) {
+      continue;
+    }
+    fields[key] = value;
+  }
+
+  if (!fields.re || !fields.nm) {
+    return null;
+  }
+
+  const sequence = Number.parseInt(fields.n || "", 10);
+  return {
+    payload,
+    channelName: fields.ch || null,
+    sessionId: fields.ss || null,
+    sequence: Number.isFinite(sequence) ? sequence : null,
+    region: fields.rg || "us",
+    realm: fields.re,
+    characterName: fields.nm,
+    source: normalizePassiveSource(fields.sr) || "passive-live",
+  };
+}
+
+function pickPreferredPassiveQueueEntry(existing, candidate) {
+  if (!existing) {
+    return candidate;
+  }
+
+  const existingSequence = Number(existing.sequence || 0);
+  const candidateSequence = Number(candidate.sequence || 0);
+  if (candidateSequence !== existingSequence) {
+    return candidateSequence > existingSequence ? candidate : existing;
+  }
+
+  const existingMs = Date.parse(existing.updatedAt || existing.firstSeenAt || existing.lastSeenAt || "");
+  const candidateMs = Date.parse(candidate.updatedAt || candidate.firstSeenAt || candidate.lastSeenAt || "");
+  if (!Number.isFinite(existingMs)) {
+    return candidate;
+  }
+  if (!Number.isFinite(candidateMs)) {
+    return existing;
+  }
+  return candidateMs >= existingMs ? candidate : existing;
+}
+
+function buildPassiveLiveQueue(passiveLiveFeedState) {
+  const liveEntries =
+    passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [];
+  const queueEntries = new Map();
+
+  for (const liveEntry of liveEntries) {
+    if (!liveEntry || liveEntry.kind !== "payload" || typeof liveEntry.preview !== "string") {
+      continue;
+    }
+
+    const payload = parsePassivePayload(liveEntry.preview);
+    if (!payload) {
+      continue;
+    }
+
+    const updatedAt = liveEntry.firstSeenAt || liveEntry.lastSeenAt || null;
+    const key = buildCacheKey(payload.region, payload.realm, payload.characterName);
+    const candidate = {
+      key,
+      region: payload.region,
+      realm: payload.realm,
+      characterName: payload.characterName,
+      source: payload.source,
+      requestOrigin: "passive-live",
+      updatedAt,
+      firstSeenAt: liveEntry.firstSeenAt || null,
+      lastSeenAt: toUnixSecondsFromIso(liveEntry.lastSeenAt || liveEntry.firstSeenAt),
+      seenCount: Number(liveEntry.seenCount || 0) || 1,
+      sequence: payload.sequence,
+      channelName: payload.channelName,
+      sessionId: payload.sessionId,
+      payload: payload.payload,
+    };
+
+    queueEntries.set(key, pickPreferredPassiveQueueEntry(queueEntries.get(key), candidate));
+  }
+
+  return [...queueEntries.values()].sort((left, right) =>
+    String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""), "en-US")
+  );
+}
+
+function mergeCharacterEntries(preferredEntries, fallbackEntries) {
+  const merged = new Map();
+
+  function upsert(entry) {
+    if (!entry || !entry.region || !entry.realm || !(entry.characterName || entry.name)) {
+      return;
+    }
+
+    const key = entry.key || buildCacheKey(entry.region, entry.realm, entry.characterName || entry.name);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, { ...entry, key });
+      return;
+    }
+
+    merged.set(key, {
+      ...existing,
+      ...entry,
+      key,
+      lastSeenAt: Math.max(existing.lastSeenAt || 0, entry.lastSeenAt || 0),
+      seenCount: Math.max(existing.seenCount || 0, entry.seenCount || 0),
+      updatedAt: latestIso(existing.updatedAt, entry.updatedAt || toIsoFromUnix(entry.lastSeenAt)),
+    });
+  }
+
+  for (const entry of fallbackEntries || []) {
+    upsert(entry);
+  }
+  for (const entry of preferredEntries || []) {
+    upsert(entry);
+  }
+
+  return [...merged.values()].sort((left, right) => (right.lastSeenAt || 0) - (left.lastSeenAt || 0));
+}
+
+function buildUnifiedQueue(cache, savedQueue, passiveLiveQueue) {
   const statusEntries = new Map(
     listRequestStatuses(cache).map((entry) => [entry.key || buildCacheKey(entry.region, entry.realm, entry.name), entry])
   );
@@ -226,6 +378,9 @@ function buildUnifiedQueue(cache, savedQueue) {
   for (const entry of savedQueue || []) {
     addEntry(entry, entry.source || "wow", "savedvariables");
   }
+  for (const entry of passiveLiveQueue || []) {
+    addEntry(entry, entry.source || "passive-live", entry.requestOrigin || "passive-live");
+  }
   for (const entry of listManualRequests(cache)) {
     addEntry(entry, entry.source || "manual", "manual");
   }
@@ -246,7 +401,10 @@ function buildDashboardState(options = {}) {
     : DEFAULT_WOW_ACCOUNT_ROOT;
   const cache = loadCache(dbPath);
   const savedVariables = loadSavedVariablesSnapshot(accountRoot);
-  const queue = buildUnifiedQueue(cache, savedVariables.parsed.requests || []);
+  const passiveLiveQueue = buildPassiveLiveQueue(options.passiveLiveFeedState);
+  const queue = buildUnifiedQueue(cache, savedVariables.parsed.requests || [], passiveLiveQueue);
+  const liveApplicants = passiveLiveQueue.filter((entry) => entry.source === "applicant");
+  const applicants = mergeCharacterEntries(savedVariables.parsed.applicants, liveApplicants);
 
   return {
     meta: {
@@ -270,7 +428,7 @@ function buildDashboardState(options = {}) {
     requestStatuses: listRequestStatuses(cache),
     queue,
     groupMembers: enrichCharacters(savedVariables.parsed.groupMembers, cache),
-    applicants: enrichCharacters(savedVariables.parsed.applicants, cache),
+    applicants: enrichCharacters(applicants, cache),
     passiveBridge: normalizePassiveBridge(savedVariables.parsed.passiveBridge),
     passiveLiveFeed: options.passiveLiveFeedState || null,
     autoSync: options.autoSyncState || {
@@ -301,14 +459,15 @@ function buildSyncRequestsFromQueue(queueEntries) {
     const sources = Array.isArray(entry.sources) ? entry.sources.filter(Boolean) : [];
     const requestOrigins = Array.isArray(entry.requestOrigins) ? entry.requestOrigins.filter(Boolean) : [];
     const hasManualOrigin = requestOrigins.includes("manual");
+    const hasPassiveOrigin = requestOrigins.includes("passive-live");
     const source = sources[0] || (hasManualOrigin ? "manual" : "savedvariables");
     const request = {
       key: entry.key,
       region: entry.region,
       realm: entry.realm,
       characterName: entry.characterName,
-      requestOrigin: hasManualOrigin ? "manual" : "savedvariables",
-      requestSource: source,
+      requestOrigin: hasManualOrigin ? "manual" : hasPassiveOrigin ? "passive-live" : "savedvariables",
+      requestSource: hasPassiveOrigin ? "passive-live" : source,
       statusSource: source,
       updatedAt: entry.requestTimestamp || null,
       lastSeenAt: entry.lastSeenAt || null,

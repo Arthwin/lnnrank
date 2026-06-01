@@ -28,6 +28,7 @@ const {
   parseLnnrankSavedVariables,
 } = require("../src/wow-addon-tools/saved-variables");
 const {
+  buildDashboardState,
   buildSyncRequestsFromQueue,
   buildUnifiedQueue,
   createDashboardServer,
@@ -513,8 +514,10 @@ test("live feed extraction keeps unique relevant memory previews", () => {
       {
         address: "0xDEF",
         encoding: "utf16",
-        previewUtf8: "LNNRANK|ch=lnnrankf24cf42579|n=2|nm=Target",
-        previewUtf16: "LNNRANK|ch=lnnrankf24cf42579|n=2|nm=Target",
+        previewUtf8:
+          "LNNRANK|ch=lnnrankf24cf42579|ss=f24cf42579|n=2|rg=us|re=Stormrage|nm=Target|sr=world",
+        previewUtf16:
+          "LNNRANK|ch=lnnrankf24cf42579|ss=f24cf42579|n=2|rg=us|re=Stormrage|nm=Target|sr=world",
       },
       {
         address: "0xFED",
@@ -528,6 +531,90 @@ test("live feed extraction keeps unique relevant memory previews", () => {
   assert.equal(entries.length, 2);
   assert.equal(entries[0].kind, "channel");
   assert.equal(entries[1].kind, "payload");
+});
+
+test("live feed extraction trims noisy payload previews to the canonical envelope", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xFEED",
+        encoding: "window",
+        previewUtf8:
+          "......YU........LNNRANK|ch=lnnrankf24cf42583|ss=f24cf42583|n=1|rg=us|re=Stormrage|nm=Prepotent|sr=world.canned =PWU.....",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(
+    entries[0].preview,
+    "LNNRANK|ch=lnnrankf24cf42583|ss=f24cf42583|n=1|rg=us|re=Stormrage|nm=Prepotent|sr=world"
+  );
+});
+
+test("dashboard state merges passive live applicant payloads into the queue and LFG view", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-passive-state-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrankf24cf42583",',
+      '  },',
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const state = buildDashboardState({
+    dbPath,
+    accountRoot,
+    passiveLiveFeedState: {
+      status: "ready",
+      entries: [
+        {
+          key: "payload:1",
+          kind: "payload",
+          preview:
+            "LNNRANK|ch=lnnrankf24cf42583|ss=f24cf42583|n=7|rg=us|re=Stormrage|nm=Fernlee|sr=applicant",
+          firstSeenAt: "2026-06-01T00:00:10.000Z",
+          lastSeenAt: "2026-06-01T00:00:12.000Z",
+        },
+      ],
+    },
+  });
+
+  assert.equal(state.meta.queueCount, 1);
+  assert.equal(state.queue.length, 1);
+  assert.deepEqual(state.queue[0].sources, ["applicant"]);
+  assert.deepEqual(state.queue[0].requestOrigins, ["passive-live"]);
+  assert.equal(state.applicants.length, 1);
+  assert.equal(state.applicants[0].characterName, "Fernlee");
+  assert.equal(state.applicants[0].source, "applicant");
+  assert.equal(state.applicants[0].lastSeenAt, 1780272012);
+
+  const requests = buildSyncRequestsFromQueue(state.queue);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].requestOrigin, "passive-live");
+  assert.equal(requests[0].requestSource, "passive-live");
+  assert.equal(requests[0].statusSource, "applicant");
 });
 
 test("dev runtime bootstraps an isolated dashboard sandbox inside the chosen root", () => {
