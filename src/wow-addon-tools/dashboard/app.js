@@ -555,11 +555,15 @@ function loadPersistedViewState() {
   } catch {}
 
   const params = new URLSearchParams(window.location.search);
-  const activeTab = normalizeTabId(params.get("tab")) || normalizeTabId(saved.activeTab) || "lfg";
+  const tabFromParams = normalizeTabId(params.get("tab"));
+  const activeTab = tabFromParams || normalizeTabId(saved.activeTab) || "lfg";
+  const useExplicitSearchParams = tabFromParams === "search";
   const resultSearch = params.get("q") != null ? params.get("q") : saved.resultSearch || "";
   const resultsPage = parsePositiveInt(params.get("rp") || saved.resultsPage, 1);
-  const resultSort = params.has("sort") ? normalizeSortColumn(params.get("sort")) : "updatedAt";
-  const resultSortDirection = params.has("dir") ? normalizeSortDirection(params.get("dir")) : "desc";
+  const resultSort =
+    useExplicitSearchParams && params.has("sort") ? normalizeSortColumn(params.get("sort")) : "updatedAt";
+  const resultSortDirection =
+    useExplicitSearchParams && params.has("dir") ? normalizeSortDirection(params.get("dir")) : "desc";
 
   state.activeTab = activeTab;
   state.resultSearch = resultSearch;
@@ -585,16 +589,16 @@ function persistViewState() {
   if (state.activeTab !== "lfg") {
     params.set("tab", state.activeTab);
   }
-  if (state.resultSearch) {
+  if (state.activeTab === "search" && state.resultSearch) {
     params.set("q", state.resultSearch);
   }
-  if (state.resultsPage > 1) {
+  if (state.activeTab === "search" && state.resultsPage > 1) {
     params.set("rp", String(state.resultsPage));
   }
-  if (state.resultSort !== "updatedAt") {
+  if (state.activeTab === "search" && state.resultSort !== "updatedAt") {
     params.set("sort", state.resultSort);
   }
-  if (state.resultSortDirection !== "desc") {
+  if (state.activeTab === "search" && state.resultSortDirection !== "desc") {
     params.set("dir", state.resultSortDirection);
   }
 
