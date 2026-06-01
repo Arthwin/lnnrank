@@ -3,82 +3,61 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>LÑÑRank Dashboard</title>
+    <title>lnnrank Dashboard</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="app-shell">
       <nav class="tabs" id="tabs">
         <button class="tab is-active" data-tab="lfg">LFG</button>
-        <button class="tab" data-tab="passive">Passive</button>
-        <button class="tab" data-tab="queue">Queue</button>
-        <button class="tab" data-tab="stats">Stats</button>
-        <button class="tab" data-tab="results">Results</button>
+        <button class="tab" data-tab="search">Search</button>
+        <button class="tab" data-tab="live">Live Log</button>
       </nav>
 
       <main class="tab-panels">
-        <section class="panel" data-panel="stats">
-          <div class="panel-stack">
-            <section class="card">
-              <div class="card-head">
-                <h2>Overview</h2>
-              </div>
-              <div class="summary-grid" id="statsGrid"></div>
-            </section>
-
-            <section class="card">
-              <div class="card-head">
-                <h2>Auto Sync</h2>
-              </div>
-              <div id="autoSyncStatus" class="list"></div>
-            </section>
-          </div>
-        </section>
-
-        <section class="panel" data-panel="results">
-          <div class="panel-toolbar toolbar-row">
-            <input id="resultSearch" type="search" placeholder="Search cached characters..." />
-            <button id="clearResultsButton" class="danger compact-toolbar-button" type="button">Clear Cache</button>
-            <div id="resultsPaginationTop" class="pager"></div>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Character</th>
-                  <th>Realm</th>
-                  <th>Status</th>
-                  <th>Source</th>
-                  <th>Score</th>
-                  <th>Updated</th>
-                  <th>Dungeons</th>
-                </tr>
-              </thead>
-              <tbody id="resultsBody"></tbody>
-            </table>
-          </div>
-          <div id="resultsPaginationBottom" class="pager pager-end"></div>
-        </section>
-
-        <section class="panel" data-panel="queue">
-          <div class="queue-layout">
-            <section class="card queue-card">
-              <div class="card-head">
-                <div class="queue-card-head-top">
-                  <h2>Pending Queue</h2>
-                  <button id="clearQueueButton" class="danger queue-clear-button" type="button">Clear Queue</button>
+        <section class="panel" data-panel="search">
+          <div class="panel-stack search-panel-stack">
+            <div class="queue-layout search-layout">
+              <section class="card queue-card">
+                <div class="card-head">
+                  <div class="queue-card-head-top">
+                    <h2>Pending Queue</h2>
+                    <button id="clearQueueButton" class="danger queue-clear-button" type="button">Clear Queue</button>
+                  </div>
                 </div>
-              </div>
-              <div id="queueList" class="list"></div>
-            </section>
+                <div id="queueList" class="list"></div>
+              </section>
 
-            <section class="card">
-              <div class="card-head">
-                <h2>Recent Statuses</h2>
-              </div>
-              <div id="statusList" class="list"></div>
-              <div id="statusPagination" class="pager pager-end"></div>
-            </section>
+              <section class="card search-results-card">
+                <div class="card-head">
+                  <div class="search-results-head">
+                    <h2>Cached Results</h2>
+                    <div id="resultsPaginationTop" class="pager"></div>
+                  </div>
+                  <div id="searchResultsSummary" class="search-summary-row search-summary-row-inline"></div>
+                </div>
+
+                <div class="panel-toolbar toolbar-row search-toolbar">
+                  <input id="resultSearch" type="search" placeholder="Search cached characters..." />
+                  <button id="clearResultsButton" class="danger compact-toolbar-button" type="button">Clear Cache</button>
+                </div>
+
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th><button class="table-sort" type="button" data-sort-column="character">Character</button></th>
+                        <th><button class="table-sort" type="button" data-sort-column="blendedPercent">Total Avg Score</button></th>
+                        <th><button class="table-sort" type="button" data-sort-column="averageParse">Avg Parse</button></th>
+                        <th><button class="table-sort" type="button" data-sort-column="score">Score</button></th>
+                        <th><button class="table-sort" type="button" data-sort-column="updatedAt">Updated</button></th>
+                      </tr>
+                    </thead>
+                    <tbody id="resultsBody"></tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
           </div>
         </section>
 
@@ -90,7 +69,7 @@
           </div>
         </section>
 
-        <section class="panel" data-panel="passive">
+        <section class="panel" data-panel="live">
           <div id="passiveView" class="panel-stack"></div>
         </section>
       </main>

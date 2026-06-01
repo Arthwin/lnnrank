@@ -1,7 +1,6 @@
-const TAB_IDS = new Set(["stats", "results", "queue", "lfg", "passive"]);
+const TAB_IDS = new Set(["search", "lfg", "live"]);
 const VIEW_STATE_STORAGE_KEY = "lnnrank-dashboard-view";
 const RESULTS_PAGE_SIZE = 20;
-const STATUS_PAGE_SIZE = 10;
 const SOURCE_LABELS = {
   manual: "Manual search",
   unit: "Ctrl-click unit frame",
@@ -61,7 +60,8 @@ const state = {
   dashboardVersion: null,
   resultSearch: "",
   resultsPage: 1,
-  statusPage: 1,
+  resultSort: "updatedAt",
+  resultSortDirection: "desc",
 };
 
 function escapeHtml(value) {
@@ -318,24 +318,38 @@ function averageDungeonParse(record) {
 }
 
 function toneClassForBlendedPerformance(record, averageParse) {
-  const blendedPercent =
-    record && record.presentation && toNumber(record.presentation.blendedPercent) != null
-      ? toNumber(record.presentation.blendedPercent)
-      : (() => {
-          const values = [
-            toNumber(averageParse),
-            getWclPerformancePercent(record && record.score),
-          ].filter((value) => value != null);
-          if (!values.length) {
-            return null;
-          }
-          return values.reduce((sum, value) => sum + value, 0) / values.length;
-        })();
+  const blendedPercent = getRecordBlendedPercent(record, averageParse);
 
   if (blendedPercent == null) {
     return toneClassForWclScore(record && record.score);
   }
   return toneClassForParsePercent(blendedPercent);
+}
+
+function getRecordAverageParse(record) {
+  if (record && record.presentation && toNumber(record.presentation.averageParsePercent) != null) {
+    return toNumber(record.presentation.averageParsePercent);
+  }
+  return averageDungeonParse(record);
+}
+
+function getRecordBlendedPercent(record, averageParse = getRecordAverageParse(record)) {
+  if (record && record.presentation && toNumber(record.presentation.blendedPercent) != null) {
+    return toNumber(record.presentation.blendedPercent);
+  }
+
+  const values = [toNumber(averageParse), getWclPerformancePercent(record && record.score)].filter(
+    (value) => value != null
+  );
+  if (!values.length) {
+    return null;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function formatPercentMetric(value) {
+  const numeric = toNumber(value);
+  return numeric == null ? "-" : `${formatCompactNumber(numeric, 1)}%`;
 }
 
 function createEmpty(label) {
@@ -498,6 +512,27 @@ function formatSourceLabel(source) {
   return raw.replaceAll("-", " ");
 }
 
+function normalizeTabId(value) {
+  const normalized = String(value || "").trim().toLocaleLowerCase("en-US");
+  if (normalized === "queue" || normalized === "results" || normalized === "stats") {
+    return "search";
+  }
+  if (normalized === "passive") {
+    return "live";
+  }
+  return TAB_IDS.has(normalized) ? normalized : null;
+}
+
+function normalizeSortColumn(value) {
+  return ["character", "blendedPercent", "averageParse", "score", "updatedAt"].includes(value)
+    ? value
+    : "updatedAt";
+}
+
+function normalizeSortDirection(value) {
+  return value === "asc" ? "asc" : "desc";
+}
+
 function latestTimestamp(left, right) {
   const leftMs = Date.parse(left || "");
   const rightMs = Date.parse(right || "");
@@ -517,15 +552,17 @@ function loadPersistedViewState() {
   } catch {}
 
   const params = new URLSearchParams(window.location.search);
-  const activeTab = TAB_IDS.has(params.get("tab")) ? params.get("tab") : TAB_IDS.has(saved.activeTab) ? saved.activeTab : "lfg";
+  const activeTab = normalizeTabId(params.get("tab")) || normalizeTabId(saved.activeTab) || "lfg";
   const resultSearch = params.get("q") != null ? params.get("q") : saved.resultSearch || "";
   const resultsPage = parsePositiveInt(params.get("rp") || saved.resultsPage, 1);
-  const statusPage = parsePositiveInt(params.get("sp") || saved.statusPage, 1);
+  const resultSort = normalizeSortColumn(params.get("sort") || saved.resultSort);
+  const resultSortDirection = normalizeSortDirection(params.get("dir") || saved.resultSortDirection);
 
   state.activeTab = activeTab;
   state.resultSearch = resultSearch;
   state.resultsPage = resultsPage;
-  state.statusPage = statusPage;
+  state.resultSort = resultSort;
+  state.resultSortDirection = resultSortDirection;
 }
 
 function persistViewState() {
@@ -533,7 +570,8 @@ function persistViewState() {
     activeTab: state.activeTab,
     resultSearch: state.resultSearch,
     resultsPage: state.resultsPage,
-    statusPage: state.statusPage,
+    resultSort: state.resultSort,
+    resultSortDirection: state.resultSortDirection,
   };
 
   try {
@@ -550,8 +588,11 @@ function persistViewState() {
   if (state.resultsPage > 1) {
     params.set("rp", String(state.resultsPage));
   }
-  if (state.statusPage > 1) {
-    params.set("sp", String(state.statusPage));
+  if (state.resultSort !== "updatedAt") {
+    params.set("sort", state.resultSort);
+  }
+  if (state.resultSortDirection !== "desc") {
+    params.set("dir", state.resultSortDirection);
   }
 
   const nextUrl = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ""}`;
@@ -612,64 +653,102 @@ function getRecordStatus(statusMap, record) {
   };
 }
 
-function renderStats(data) {
-  const sync = data.autoSync || {};
-  const syncLabel = sync.isRunning ? "Running" : sync.lastError ? "Needs attention" : "Idle";
-
-  document.getElementById("statsGrid").innerHTML = [
-    createSummaryItem("Cached Records", data.meta.recordCount),
-    createSummaryItem("Queued Lookups", data.meta.queueCount),
-    createSummaryItem(
-      "Last WoW Snapshot",
-      data.meta.savedVariablesUpdatedAt ? formatDate(data.meta.savedVariablesUpdatedAt) : "Not found"
-    ),
-    createSummaryItem("Auto Sync", syncLabel),
-  ].join("");
-
-  const autoSyncStatus = document.getElementById("autoSyncStatus");
-  autoSyncStatus.innerHTML = `
-    <article class="list-item">
-      <header>
-        <div>
-          <strong>Background Worker</strong>
-          <div class="list-meta">
-            <span class="pill ${statusPill(sync.isRunning ? "running" : sync.lastError ? "error" : "idle")}">
-              ${escapeHtml(syncLabel)}
-            </span>
-            <span>mode ${escapeHtml(sync.mode || "auto")}</span>
-            <span>started ${escapeHtml(formatDate(sync.lastStartedAt))}</span>
-            <span>finished ${escapeHtml(formatDate(sync.lastFinishedAt))}</span>
-          </div>
-        </div>
-      </header>
-      <div class="list-meta">
-        <span>Last run requests: ${escapeHtml(sync.lastResult && sync.lastResult.requests != null ? sync.lastResult.requests : 0)}</span>
-        <span>Statuses written: ${escapeHtml(sync.lastResult && sync.lastResult.statuses != null ? sync.lastResult.statuses : 0)}</span>
-        <span>Cached records: ${escapeHtml(sync.lastResult && sync.lastResult.cachedRecords != null ? sync.lastResult.cachedRecords : data.meta.recordCount)}</span>
-        <span>Current queue size: ${escapeHtml(sync.queueLength != null ? sync.queueLength : data.meta.queueCount)}</span>
-        <span>Saved statuses: ${escapeHtml(sync.statusCount != null ? sync.statusCount : 0)}</span>
-      </div>
-      ${
-        sync.lastError
-          ? `<div>${escapeHtml(sync.lastError)}</div>`
-          : `<div>${
-              sync.currentLookup && (sync.currentLookup.characterName || sync.currentLookup.name)
-                ? `Working on ${escapeHtml(sync.currentLookup.characterName || sync.currentLookup.name)}-${escapeHtml(sync.currentLookup.realm || "")}. `
-                : ""
-            }Provider selection is automatic. The app prefers API when allowed and falls back to web lookups when needed.</div>`
-      }
+function createSearchSummaryChip(label, value, tone = "", options = {}) {
+  return `
+    <article class="search-summary-chip${tone ? ` ${tone}` : ""}">
+      <span class="search-summary-label">${escapeHtml(label)}</span>
+      <strong class="search-summary-value">${escapeHtml(value)}</strong>
+      ${options.meta ? `<span class="search-summary-meta">${escapeHtml(options.meta)}</span>` : ""}
     </article>
   `;
 }
 
-function renderResults(data) {
-  const statusMap = getStatusMap(data);
-  const rows = sortByName(data.records).filter((record) => {
+function renderSearchSummary(data) {
+  const sync = data.autoSync || {};
+  const syncLabel = sync.isRunning ? "Running" : sync.lastError ? "Attention" : "Idle";
+  const workerMeta = sync.isRunning
+    ? [
+        sync.mode || "auto",
+        sync.currentLookup && (sync.currentLookup.characterName || sync.currentLookup.name)
+          ? `${sync.currentLookup.characterName || sync.currentLookup.name}${sync.currentLookup.realm ? `-${sync.currentLookup.realm}` : ""}`
+          : "working",
+      ].join(" · ")
+    : sync.lastError
+      ? `${sync.mode || "auto"} · last run failed`
+      : sync.lastFinishedAt
+        ? `${sync.mode || "auto"} · ${formatShortDate(sync.lastFinishedAt)}`
+        : sync.mode || "auto";
+  const target = document.getElementById("searchResultsSummary");
+  target.innerHTML = [
+    createSearchSummaryChip("Cached", formatCompactNumber(data.meta.recordCount, 0), "is-ok"),
+    createSearchSummaryChip("Queue", formatCompactNumber(data.meta.queueCount, 0), data.meta.queueCount > 0 ? "is-warn" : ""),
+    createSearchSummaryChip(
+      "Snapshot",
+      data.meta.savedVariablesUpdatedAt ? formatShortDate(data.meta.savedVariablesUpdatedAt) : "Not found"
+    ),
+    createSearchSummaryChip(
+      "Sync",
+      syncLabel,
+      sync.lastError ? "is-bad" : sync.isRunning ? "is-warn" : "is-ok",
+      { meta: workerMeta }
+    ),
+  ].join("");
+}
+
+function compareText(left, right) {
+  return String(left || "").localeCompare(String(right || ""), "en-US");
+}
+
+function compareNumber(left, right) {
+  const leftNumber = typeof left === "number" && Number.isFinite(left) ? left : Number.NEGATIVE_INFINITY;
+  const rightNumber = typeof right === "number" && Number.isFinite(right) ? right : Number.NEGATIVE_INFINITY;
+  if (leftNumber === rightNumber) {
+    return 0;
+  }
+  return leftNumber < rightNumber ? -1 : 1;
+}
+
+function compareDate(left, right) {
+  return compareNumber(Date.parse(left || ""), Date.parse(right || ""));
+}
+
+function getSortedResults(data) {
+  const filtered = (data.records || []).filter((record) => {
     if (!state.resultSearch) {
       return true;
     }
     return `${record.name} ${record.realm} ${record.region}`.toLowerCase().includes(state.resultSearch.toLowerCase());
   });
+
+  return filtered.sort((left, right) => {
+    const leftAverageParse = getRecordAverageParse(left);
+    const rightAverageParse = getRecordAverageParse(right);
+    const leftBlendedPercent = getRecordBlendedPercent(left, leftAverageParse);
+    const rightBlendedPercent = getRecordBlendedPercent(right, rightAverageParse);
+    let comparison = 0;
+
+    if (state.resultSort === "character") {
+      comparison = compareText(left.name, right.name);
+    } else if (state.resultSort === "blendedPercent") {
+      comparison = compareNumber(leftBlendedPercent, rightBlendedPercent);
+    } else if (state.resultSort === "averageParse") {
+      comparison = compareNumber(leftAverageParse, rightAverageParse);
+    } else if (state.resultSort === "score") {
+      comparison = compareNumber(toNumber(left.score), toNumber(right.score));
+    } else {
+      comparison = compareDate(left.updatedAt, right.updatedAt);
+    }
+
+    if (comparison === 0) {
+      comparison = compareText(`${left.name}-${left.realm}`, `${right.name}-${right.realm}`);
+    }
+
+    return state.resultSortDirection === "asc" ? comparison : -comparison;
+  });
+}
+
+function renderResults(data) {
+  const rows = getSortedResults(data);
   const paged = paginateItems(rows, state.resultsPage, RESULTS_PAGE_SIZE);
   state.resultsPage = paged.page;
   persistViewState();
@@ -677,31 +756,42 @@ function renderResults(data) {
   const resultsBody = document.getElementById("resultsBody");
   const pagerMarkup = createPagerMarkup("results", paged.page, paged.totalPages);
   document.getElementById("resultsPaginationTop").innerHTML = pagerMarkup;
-  document.getElementById("resultsPaginationBottom").innerHTML = pagerMarkup;
+  document.querySelectorAll("[data-sort-column]").forEach((button) => {
+    const label = button.dataset.sortLabel || button.textContent.trim();
+    button.dataset.sortLabel = label;
+    const isActive = button.dataset.sortColumn === state.resultSort;
+    button.classList.toggle("is-active", isActive);
+    button.textContent = isActive ? `${label} ${state.resultSortDirection === "asc" ? "↑" : "↓"}` : label;
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+  });
 
   if (paged.items.length === 0) {
-    resultsBody.innerHTML = `<tr><td colspan="7"><div class="empty">No cached results match this search.</div></td></tr>`;
+    resultsBody.innerHTML = `<tr><td colspan="5"><div class="empty">No cached results match this search.</div></td></tr>`;
     return;
   }
 
   resultsBody.innerHTML = paged.items
     .map((record) => {
-      const status = getRecordStatus(statusMap, record);
       const roleLabel = createRoleLabelMarkup(resolveRoleForCharacter(record), "results-role-icon");
+      const averageParse = getRecordAverageParse(record);
+      const blendedPercent = getRecordBlendedPercent(record, averageParse);
+      const locationParts = [record.realm];
+      if (record.region) {
+        locationParts.push(`(${String(record.region).toUpperCase()})`);
+      }
       return `
         <tr>
           <td>
             <div class="results-character-cell">
               <a class="wcl-character-link results-name-link" href="${escapeHtml(buildWclCharacterUrl(record))}" target="_blank" rel="noreferrer noopener">${escapeHtml(record.name)}</a>
               ${roleLabel ? `<div class="results-role-meta">${roleLabel}</div>` : ""}
+              <div class="results-location-meta">${escapeHtml(locationParts.join(" "))}</div>
             </div>
           </td>
-          <td>${escapeHtml(record.realm)} <span class="summary-label">(${escapeHtml(record.region)})</span></td>
-          <td><span class="pill status-pill ${statusPill(status.state)}">${escapeHtml(status.state)}</span></td>
-          <td>${escapeHtml(formatSourceLabel(status.source))}</td>
+          <td><span class="tone-value ${toneClassForBlendedPerformance(record, averageParse)}">${escapeHtml(formatPercentMetric(blendedPercent))}</span></td>
+          <td><span class="tone-value ${toneClassForParsePercent(averageParse)}">${escapeHtml(formatPercentMetric(averageParse))}</span></td>
           <td><span class="tone-value ${toneClassForWclScore(record.score)}">${escapeHtml(formatCompactNumber(record.score))}</span></td>
           <td>${escapeHtml(formatDate(record.updatedAt))}</td>
-          <td>${Array.isArray(record.dungeons) ? record.dungeons.length : 0}</td>
         </tr>
       `;
     })
@@ -736,40 +826,6 @@ function renderQueue(data) {
             <span>Score: ${entry.record && entry.record.score != null ? escapeHtml(entry.record.score) : "-"}</span>
             ${entry.seenCount ? `<span>seen ${escapeHtml(entry.seenCount)}x</span>` : ""}
           </div>
-        </article>
-      `
-    )
-    .join("");
-}
-
-function renderStatuses(data) {
-  const target = document.getElementById("statusList");
-  const paged = paginateItems(data.requestStatuses || [], state.statusPage, STATUS_PAGE_SIZE);
-  state.statusPage = paged.page;
-  persistViewState();
-  document.getElementById("statusPagination").innerHTML = createPagerMarkup("statuses", paged.page, paged.totalPages);
-
-  if (!paged.items.length) {
-    target.innerHTML = createEmpty("No sync statuses yet.");
-    return;
-  }
-
-  target.innerHTML = paged.items
-    .map(
-      (entry) => `
-        <article class="list-item">
-          <header>
-            <div>
-              <strong>${escapeHtml(entry.name)}</strong>
-              <div class="list-meta">
-                <span>${escapeHtml(entry.realm)}</span>
-                <span>${escapeHtml(formatSourceLabel(entry.source))}</span>
-                <span class="pill ${statusPill(entry.state)}">${escapeHtml(entry.state)}</span>
-                <span>${escapeHtml(formatDate(entry.updatedAt))}</span>
-              </div>
-            </div>
-          </header>
-          <div>${escapeHtml(entry.message || "")}</div>
         </article>
       `
     )
@@ -903,7 +959,7 @@ function renderPassive(data) {
     target.innerHTML = `
       <section class="card">
         <div class="card-head">
-          <h2>Passive Feed</h2>
+          <h2>Live Log</h2>
         </div>
         ${createEmpty("Run /reload once after loading the addon, then open this tab again.")}
       </section>
@@ -934,7 +990,7 @@ function renderPassive(data) {
     <section class="card passive-card-compact">
       <div class="passive-head-compact">
         <div>
-          <h2>Passive Feed</h2>
+          <h2>Live Log</h2>
           <p>${escapeHtml(playerLabel)} <span class="passive-head-sep">·</span> ${escapeHtml(regionLabel)}</p>
         </div>
         <div class="passive-inline-note">
@@ -1165,10 +1221,9 @@ function renderAll() {
     return;
   }
 
-  renderStats(state.data);
+  renderSearchSummary(state.data);
   renderResults(state.data);
   renderQueue(state.data);
-  renderStatuses(state.data);
   renderPassive(state.data);
   renderRosterList("applicantList", state.data.applicants, "No LFG applicants in the last WoW snapshot.", state.data);
   applyActiveTab();
@@ -1230,7 +1285,6 @@ async function clearResultsCache() {
       body: JSON.stringify({}),
     });
     state.resultsPage = 1;
-    state.statusPage = 1;
     await loadState();
   } finally {
     if (button) {
@@ -1300,8 +1354,6 @@ function bindPagination() {
     const action = pagerButton.dataset.pageAction;
     if (target === "results") {
       state.resultsPage = Math.max(1, state.resultsPage + (action === "next" ? 1 : -1));
-    } else if (target === "statuses") {
-      state.statusPage = Math.max(1, state.statusPage + (action === "next" ? 1 : -1));
     }
     persistViewState();
     renderAll();
@@ -1340,6 +1392,23 @@ function bindEvents() {
   }
 
   document.body.addEventListener("click", (event) => {
+    const sortButton = event.target.closest("[data-sort-column]");
+    if (sortButton) {
+      const nextColumn = normalizeSortColumn(sortButton.dataset.sortColumn);
+      if (state.resultSort === nextColumn) {
+        state.resultSortDirection = state.resultSortDirection === "asc" ? "desc" : "asc";
+      } else {
+        state.resultSort = nextColumn;
+        state.resultSortDirection = nextColumn === "updatedAt" ? "desc" : "asc";
+      }
+      state.resultsPage = 1;
+      persistViewState();
+      if (state.data) {
+        renderResults(state.data);
+      }
+      return;
+    }
+
     const removeButton = event.target.closest("[data-remove-queue]");
     if (removeButton) {
       void removeQueue(removeButton.dataset.removeQueue);
