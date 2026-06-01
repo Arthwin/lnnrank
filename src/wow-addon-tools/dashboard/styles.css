@@ -737,6 +737,140 @@ code {
   line-height: 1.35;
 }
 
+.passive-card-compact {
+  padding-bottom: 1rem;
+}
+
+.passive-head-compact {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.passive-head-compact h2 {
+  margin: 0 0 0.2rem;
+}
+
+.passive-head-compact p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.passive-head-sep {
+  opacity: 0.55;
+}
+
+.passive-inline-note {
+  padding: 0.45rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(13, 107, 95, 0.08);
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.passive-stat-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.passive-stat-chip {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.65rem 0.8rem;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid var(--line);
+}
+
+.passive-stat-chip-code .passive-stat-value {
+  font-family: "Cascadia Code", "Consolas", monospace;
+}
+
+.passive-stat-label {
+  display: block;
+  margin-bottom: 0.12rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.passive-stat-value {
+  display: block;
+  font-size: 0.95rem;
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.passive-log-card {
+  padding-top: 1rem;
+}
+
+.passive-log-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+}
+
+.passive-log-head h2 {
+  margin: 0 0 0.2rem;
+}
+
+.passive-log-head p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.passive-log-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.passive-log-row {
+  padding: 0.8rem 0.9rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid var(--line);
+}
+
+.passive-log-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 0.8rem;
+}
+
+.passive-log-row-head strong {
+  font-size: 0.96rem;
+  line-height: 1.25;
+}
+
+.passive-log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: end;
+  gap: 0.4rem 0.75rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-align: right;
+}
+
+.passive-log-payload {
+  margin-top: 0.55rem;
+  margin-bottom: 0;
+  padding: 0.75rem 0.85rem;
+  border-radius: 14px;
+  font-size: 0.82rem;
+  line-height: 1.42;
+}
+
 .passive-layout {
   align-items: stretch;
 }
@@ -836,5 +970,21 @@ code {
 
   .queue-card-head-top {
     flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 720px) {
+  .passive-head-compact,
+  .passive-log-head,
+  .passive-log-row-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .passive-inline-note,
+  .passive-log-meta {
+    white-space: normal;
+    text-align: left;
+    justify-content: start;
   }
 }

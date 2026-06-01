@@ -80,6 +80,31 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function formatShortDate(value) {
+  if (!value) {
+    return "Unknown";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const now = new Date();
+  const isSameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+
+  return isSameDay
+    ? date.toLocaleTimeString([], {
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+      })
+    : date.toLocaleDateString();
+}
+
 function toNumber(value) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -473,6 +498,18 @@ function formatSourceLabel(source) {
   return raw.replaceAll("-", " ");
 }
 
+function latestTimestamp(left, right) {
+  const leftMs = Date.parse(left || "");
+  const rightMs = Date.parse(right || "");
+  if (!Number.isFinite(leftMs)) {
+    return right || null;
+  }
+  if (!Number.isFinite(rightMs)) {
+    return left || null;
+  }
+  return rightMs >= leftMs ? right : left;
+}
+
 function loadPersistedViewState() {
   let saved = {};
   try {
@@ -739,6 +776,121 @@ function renderStatuses(data) {
     .join("");
 }
 
+function formatPassiveLiveStatus(liveFeed) {
+  return !liveFeed || liveFeed.status === "idle"
+    ? "Idle"
+    : liveFeed.status === "ready"
+      ? "Watching"
+      : liveFeed.status === "scanning"
+        ? "Scanning"
+        : liveFeed.status === "waiting"
+          ? "Waiting"
+          : liveFeed.status === "unsupported"
+            ? "Unsupported"
+            : "Error";
+}
+
+function parsePassivePayloadEnvelope(payload) {
+  const match = String(payload || "").match(
+    /^LNNRANK\|ch=([^|]+)\|ss=([^|]+)\|n=(\d+)\|rg=([^|]+)\|re=([^|]+)\|nm=([^|]+)\|sr=([^|]+)$/u
+  );
+  if (!match) {
+    return null;
+  }
+
+  const [, channelName, sessionId, sequence, region, realm, characterName, source] = match;
+  return {
+    channelName,
+    sessionId,
+    sequence: Number.parseInt(sequence, 10) || 0,
+    region,
+    realm,
+    characterName,
+    source,
+  };
+}
+
+function createPassiveStatChip(label, value, options = {}) {
+  const displayValue = value == null || value === "" ? "Unknown" : String(value);
+  return `
+    <article class="passive-stat-chip${options.code ? " passive-stat-chip-code" : ""}">
+      <span class="passive-stat-label">${escapeHtml(label)}</span>
+      <strong class="passive-stat-value">${escapeHtml(displayValue)}</strong>
+    </article>
+  `;
+}
+
+function buildPassiveLogEntries(passive, liveFeed) {
+  const merged = new Map();
+  const liveEntries = liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
+  const messageLog = Array.isArray(passive && passive.messageLog) ? passive.messageLog : [];
+
+  function upsertEntry(id, candidate) {
+    const existing = merged.get(id);
+    if (!existing) {
+      merged.set(id, candidate);
+      return;
+    }
+
+    existing.sortAt = latestTimestamp(existing.sortAt, candidate.sortAt);
+    existing.title = existing.title || candidate.title;
+    existing.source = existing.source || candidate.source;
+    existing.sequence = existing.sequence || candidate.sequence;
+    existing.payload = existing.payload || candidate.payload;
+    existing.transport =
+      existing.transport === candidate.transport
+        ? existing.transport
+        : existing.transport === "Live + Saved" || candidate.transport === "Live + Saved"
+          ? "Live + Saved"
+          : "Live + Saved";
+  }
+
+  for (const entry of liveEntries) {
+    if (!entry || entry.kind !== "payload" || !entry.preview) {
+      continue;
+    }
+
+    const parsed = parsePassivePayloadEnvelope(entry.preview);
+    if (!parsed) {
+      continue;
+    }
+
+    upsertEntry(`payload:${entry.preview}`, {
+      id: `payload:${entry.preview}`,
+      sortAt: entry.lastSeenAt || entry.firstSeenAt || null,
+      title: [parsed.characterName, parsed.realm].filter(Boolean).join("-") || "Unknown character",
+      source: formatSourceLabel(parsed.source),
+      sequence: parsed.sequence,
+      payload: entry.preview,
+      transport: "Live",
+    });
+  }
+
+  for (const entry of messageLog) {
+    if (!entry || !entry.payload) {
+      continue;
+    }
+
+    const parsed = parsePassivePayloadEnvelope(entry.payload);
+    upsertEntry(`payload:${entry.payload}`, {
+      id: `payload:${entry.payload}`,
+      sortAt: entry.publishedAtIso || null,
+      title:
+        parsed && parsed.characterName && parsed.realm
+          ? `${parsed.characterName}-${parsed.realm}`
+          : [entry.characterName, entry.realm].filter(Boolean).join("-") || "Unknown character",
+      source: formatSourceLabel((parsed && parsed.source) || entry.source || "wow"),
+      sequence: (parsed && parsed.sequence) || entry.sequence || 0,
+      payload: entry.payload,
+      transport: "Saved",
+    });
+  }
+
+  return [...merged.values()].sort((left, right) =>
+    String(right.sortAt || "").localeCompare(String(left.sortAt || ""), "en-US")
+  );
+}
+
 function renderPassive(data) {
   const target = document.getElementById("passiveView");
   if (!target) {
@@ -751,8 +903,7 @@ function renderPassive(data) {
     target.innerHTML = `
       <section class="card">
         <div class="card-head">
-          <h2>Passive Self-Channel</h2>
-          <p>The addon has not written passive channel state into SavedVariables yet.</p>
+          <h2>Passive Feed</h2>
         </div>
         ${createEmpty("Run /reload once after loading the addon, then open this tab again.")}
       </section>
@@ -760,77 +911,63 @@ function renderPassive(data) {
     return;
   }
 
-  const statusLabel = !passive.enabled ? "Disabled" : passive.joined ? "Joined" : "Enabled";
-  const lastSavedVariablesFlush =
-    data.meta && data.meta.savedVariablesUpdatedAt
-      ? formatDate(data.meta.savedVariablesUpdatedAt)
-      : "Waiting for the next /reload or logout.";
-  const lastPayload =
-    typeof passive.lastPublishedPayload === "string" && passive.lastPublishedPayload.trim() !== ""
-      ? passive.lastPublishedPayload
-      : null;
-  const messageLog = Array.isArray(passive.messageLog) ? passive.messageLog : [];
   const playerLabel = [passive.playerName, passive.realm].filter(Boolean).join("-") || "Unknown";
   const regionLabel = passive.region ? String(passive.region).toUpperCase() : "Unknown";
-  const liveEntries = liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
-  const liveStatus =
-    !liveFeed || liveFeed.status === "idle"
-      ? "Idle"
-      : liveFeed.status === "ready"
-        ? "Watching"
-        : liveFeed.status === "scanning"
-          ? "Scanning"
-          : liveFeed.status === "waiting"
-            ? "Waiting"
-            : liveFeed.status === "unsupported"
-              ? "Unsupported"
-              : "Error";
+  const liveStatus = formatPassiveLiveStatus(liveFeed);
+  const logEntries = buildPassiveLogEntries(passive, liveFeed);
+  const statsMarkup = [
+    createPassiveStatChip("Live", liveStatus),
+    createPassiveStatChip("Channel", passive.channelName || "Unknown", { code: true }),
+    createPassiveStatChip("Seq", formatCompactNumber(passive.sequence ?? 0, 0)),
+    createPassiveStatChip(
+      "WoW PID",
+      liveFeed && liveFeed.wowProcessId != null ? String(liveFeed.wowProcessId) : "Unknown",
+      { code: true }
+    ),
+    createPassiveStatChip(
+      "Scan",
+      liveFeed && liveFeed.lastScannedAt ? formatShortDate(liveFeed.lastScannedAt) : "Never"
+    ),
+  ].join("");
 
   target.innerHTML = `
-    <section class="card">
-      <div class="card-head">
-        <h2>Passive Self-Channel</h2>
-        <p>This tab reflects the addon's persisted bridge state. Channel changes and payload snapshots appear here after WoW flushes SavedVariables.</p>
+    <section class="card passive-card-compact">
+      <div class="passive-head-compact">
+        <div>
+          <h2>Passive Feed</h2>
+          <p>${escapeHtml(playerLabel)} <span class="passive-head-sep">·</span> ${escapeHtml(regionLabel)}</p>
+        </div>
+        <div class="passive-inline-note">
+          ${escapeHtml(liveFeed && liveFeed.lastError ? liveFeed.lastError : `${logEntries.length} log entr${logEntries.length === 1 ? "y" : "ies"}`)}
+        </div>
       </div>
-      <div class="summary-grid passive-summary-grid">
-        ${createSummaryItem("Status", statusLabel)}
-        ${createSummaryItem("Sequence", formatCompactNumber(passive.sequence ?? 0, 0))}
-        ${createSummaryItem("Messages", formatCompactNumber(passive.messageCount ?? messageLog.length, 0))}
-        ${createSummaryItem("Live Feed", liveStatus)}
-        ${createSummaryItem(
-          "Last Publish",
-          passive.lastPublishedAtIso ? formatDate(passive.lastPublishedAtIso) : "None yet"
-        )}
-        ${createSummaryItem("SavedVariables", lastSavedVariablesFlush)}
+      <div class="passive-stat-grid">
+        ${statsMarkup}
       </div>
     </section>
 
-    <section class="card">
-      <div class="card-head">
-        <h2>Live Channel Feed</h2>
-        <p>This watches the active WoW process directly, so new channel traces can appear here without another /reload.</p>
-      </div>
-      <div class="detail-list">
-        ${createDetailRow("Status", liveStatus)}
-        ${createDetailRow("WoW PID", liveFeed && liveFeed.wowProcessId != null ? String(liveFeed.wowProcessId) : "Unknown", { code: true })}
-        ${createDetailRow("Last Scan", liveFeed && liveFeed.lastScannedAt ? formatDate(liveFeed.lastScannedAt) : "Never")}
-        ${createDetailRow("Scan Time", liveFeed && liveFeed.scanDurationMs != null ? `${formatCompactNumber(liveFeed.scanDurationMs, 0)} ms` : "Unknown")}
-        ${createDetailRow("Scan Error", liveFeed && liveFeed.lastError ? liveFeed.lastError : "None")}
+    <section class="card passive-log-card">
+      <div class="passive-log-head">
+        <h2>Relay Log</h2>
+        <p>Clean outbound payloads from the addon, merged from live memory and saved snapshots.</p>
       </div>
       ${
-        liveEntries.length
-          ? `<div class="message-log">
-              ${liveEntries
+        logEntries.length
+          ? `<div class="passive-log-list">
+              ${logEntries
                 .map(
                   (entry) => `
-                    <article class="message-log-row">
-                      <div class="message-log-meta">
-                        <span>${escapeHtml(entry.lastSeenAt ? formatDate(entry.lastSeenAt) : "Unknown time")}</span>
-                        <span>${escapeHtml(entry.kind || "memory-hit")}</span>
-                        <span>${escapeHtml(entry.encoding || "unknown")}</span>
-                        <span>${escapeHtml(entry.address || "unknown")}</span>
+                    <article class="passive-log-row">
+                      <div class="passive-log-row-head">
+                        <strong>${escapeHtml(entry.title)}</strong>
+                        <div class="passive-log-meta">
+                          <span>${escapeHtml(entry.sortAt ? formatDate(entry.sortAt) : "Unknown time")}</span>
+                          <span>${escapeHtml(entry.source)}</span>
+                          <span>seq ${escapeHtml(formatCompactNumber(entry.sequence || 0, 0))}</span>
+                          <span>${escapeHtml(entry.transport)}</span>
+                        </div>
                       </div>
-                      <pre class="code-block message-log-payload">${escapeHtml(entry.preview || "")}</pre>
+                      <pre class="code-block passive-log-payload">${escapeHtml(entry.payload || "")}</pre>
                     </article>
                   `
                 )
@@ -838,74 +975,9 @@ function renderPassive(data) {
             </div>`
           : createEmpty(
               liveFeed && liveFeed.lastError
-                ? "The live scanner ran into an error. See Scan Error above."
-                : "No live channel traces have been observed yet."
+                ? "The live scanner hit an error, so there are no clean payloads to show yet."
+                : "No relay payloads have been captured yet."
             )
-      }
-    </section>
-
-    <div class="queue-layout passive-layout">
-      <section class="card">
-        <div class="card-head">
-          <h2>Channel Identity</h2>
-          <p>The app can use this player-specific marker to watch outbound payloads.</p>
-        </div>
-        <div class="detail-list">
-          ${createDetailRow("Channel", passive.channelName || "Unknown", { code: true })}
-          ${createDetailRow("Player Key", passive.playerKey || "Unknown", { code: true })}
-          ${createDetailRow("Session", passive.sessionId || "Unknown", { code: true })}
-          ${createDetailRow("Player", playerLabel)}
-          ${createDetailRow("Region", regionLabel)}
-          ${createDetailRow("GUID", passive.playerGuid || "Unknown", { code: true })}
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <h2>Latest Relay Snapshot</h2>
-          <p>The last outbound payload captured in the addon's SavedVariables snapshot.</p>
-        </div>
-        <div class="detail-list">
-          ${createDetailRow("Bridge Updated", passive.updatedAtIso ? formatDate(passive.updatedAtIso) : "Unknown")}
-          ${createDetailRow("Last Publish", passive.lastPublishedAtIso ? formatDate(passive.lastPublishedAtIso) : "None yet")}
-          ${createDetailRow("Joined Channel", passive.joined ? "Yes" : "No")}
-          ${createDetailRow("Enabled", passive.enabled ? "Yes" : "No")}
-        </div>
-        ${
-          lastPayload
-            ? `<pre class="code-block passive-payload">${escapeHtml(lastPayload)}</pre>`
-            : createEmpty("No passive payload has been persisted yet.")
-        }
-      </section>
-    </div>
-
-    <section class="card">
-      <div class="card-head">
-        <h2>Received Messages</h2>
-        <p>The app-side view of payloads captured in the latest SavedVariables snapshot.</p>
-      </div>
-      ${
-        messageLog.length
-          ? `<div class="message-log">
-              ${messageLog
-                .map(
-                  (entry) => `
-                    <article class="message-log-row">
-                      <div class="message-log-meta">
-                        <span>${escapeHtml(entry.publishedAtIso ? formatDate(entry.publishedAtIso) : "Unknown time")}</span>
-                        <span>seq ${escapeHtml(formatCompactNumber(entry.sequence ?? 0, 0))}</span>
-                        <span>${escapeHtml(formatSourceLabel(entry.source || "wow"))}</span>
-                        <span>${escapeHtml(
-                          [entry.characterName, entry.realm].filter(Boolean).join("-") || "Unknown character"
-                        )}</span>
-                      </div>
-                      <pre class="code-block message-log-payload">${escapeHtml(entry.payload || "")}</pre>
-                    </article>
-                  `
-                )
-                .join("")}
-            </div>`
-          : createEmpty("No passive messages have been persisted yet.")
       }
     </section>
   `;
