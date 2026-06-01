@@ -284,11 +284,52 @@ function normalizePassivePreview(preview) {
     : null;
 }
 
+function parsePassiveCandidateMetadata(preview) {
+  const payload = extractCanonicalPayload(preview);
+  if (!payload) {
+    return {
+      payload: null,
+      source: null,
+      sequence: 0,
+      timestampMs: 0,
+    };
+  }
+
+  const sourceMatch = payload.match(/\|sr=([^|]+)(?:\||$)/u);
+  const sequenceMatch = payload.match(/\|n=(\d+)(?:\||$)/u);
+  return {
+    payload,
+    source: sourceMatch ? sourceMatch[1] : null,
+    sequence: sequenceMatch ? Number.parseInt(sequenceMatch[1], 10) || 0 : 0,
+    timestampMs: extractPayloadTimestampMs(payload) || 0,
+  };
+}
+
+function getPassiveCandidateSourceWeight(source) {
+  switch (String(source || "").toLowerCase()) {
+    case "unit":
+    case "world":
+    case "chat-link":
+    case "chatlink":
+    case "manual":
+      return 6;
+    case "applicant":
+      return 5;
+    case "self":
+      return 4;
+    case "appclear":
+      return 1;
+    default:
+      return source ? 3 : 0;
+  }
+}
+
 function selectPassiveAddressCandidates(scanResult) {
   const matches = Array.isArray(scanResult && scanResult.matches) ? scanResult.matches : [];
   return matches
     .map((match) => {
       const preview = String(match.previewUtf8 || match.previewUtf16 || "");
+      const metadata = parsePassiveCandidateMetadata(preview);
       let priority = 0;
       if (preview.includes("]:")) {
         priority += 3;
@@ -304,11 +345,21 @@ function selectPassiveAddressCandidates(scanResult) {
         address: match.address,
         numericAddress: Number.parseInt(String(match.address || "").replace(/^0x/iu, ""), 16),
         priority,
+        sourceWeight: getPassiveCandidateSourceWeight(metadata.source),
+        timestampMs: metadata.timestampMs,
+        sequence: metadata.sequence,
       };
     })
     .filter((entry) => Number.isFinite(entry.numericAddress) && entry.numericAddress > 0)
-    .sort((left, right) => right.priority - left.priority || left.numericAddress - right.numericAddress)
-    .slice(0, 12)
+    .sort(
+      (left, right) =>
+        right.sourceWeight - left.sourceWeight ||
+        right.timestampMs - left.timestampMs ||
+        right.sequence - left.sequence ||
+        right.priority - left.priority ||
+        right.numericAddress - left.numericAddress
+    )
+    .slice(0, 24)
     .map((entry) => `0x${entry.numericAddress.toString(16).toUpperCase("en-US")}`);
 }
 

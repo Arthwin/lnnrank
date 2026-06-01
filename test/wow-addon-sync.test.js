@@ -37,6 +37,7 @@ const {
 const {
   buildPassiveDiscoveryPattern,
   extractPassiveLiveFeedEntries,
+  selectPassiveAddressCandidates,
 } = require("../src/wow-addon-tools/passive-live-feed");
 const {
   buildDevRuntimePaths,
@@ -657,6 +658,36 @@ test("live feed extraction accepts payloads with an empty passive session id", (
     entries[0].preview,
     "LNNRANK|ch=lnnrank0ff24cf4|ss=|n=75|rg=us|re=Stormrage|nm=Tskihi|sr=applicant|ai=22|mi=1|ar=DAMAGER|cl=SHAMAN|il=280.9|lv=90"
   );
+});
+
+test("passive address candidates prefer newer non-appclear payloads", () => {
+  const candidates = selectPassiveAddressCandidates({
+    matches: [
+      {
+        address: "0x1000",
+        encoding: "utf8",
+        previewUtf8:
+          "LNNRANK|ch=lnnrank0ff24cf4|ss=oldsession|n=19738|rg=us|re=Stormrage|nm=Urmomgargles|sr=appclear|t=1780290468644",
+        previewUtf16: "",
+      },
+      {
+        address: "0x2000",
+        encoding: "utf8",
+        previewUtf8:
+          "LNNRANK|ch=lnnrank0ff24cf4|ss=newsession|n=81|rg=us|re=Azshara|nm=Ceaserianoma|sr=applicant|ai=1|gi=1|mi=1|ar=DAMAGER|cl=WARLOCK|il=282.5|lv=90|t=1780322137757",
+        previewUtf16: "",
+      },
+      {
+        address: "0x3000",
+        encoding: "utf8",
+        previewUtf8:
+          "LNNRANK|ch=lnnrank0ff24cf4|ss=newsession|n=82|rg=us|re=Stormrage|nm=Clickedunit|sr=unit|t=1780322138758",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.deepEqual(candidates.slice(0, 3), ["0x3000", "0x2000", "0x1000"]);
 });
 
 test("dashboard state merges passive live applicant payloads into the queue and LFG view", () => {

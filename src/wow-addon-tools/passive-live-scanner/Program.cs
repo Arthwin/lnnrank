@@ -191,13 +191,13 @@ internal static class PassiveScanner
         var seenKeys = new HashSet<string>(StringComparer.Ordinal);
 
         NativeMethods.GetSystemInfo(out var systemInfo);
-        var currentAddress = systemInfo.MinimumApplicationAddress.ToInt64();
-        var maxAddress = systemInfo.MaximumApplicationAddress.ToInt64();
-
         using var processHandle = OpenProcess(options.ProcessId);
         var memoryInfoSize = Marshal.SizeOf<NativeMethods.MemoryBasicInformation>();
+        var currentAddress = systemInfo.MinimumApplicationAddress.ToInt64();
+        var maxAddress = systemInfo.MaximumApplicationAddress.ToInt64();
+        var regions = new List<(long RegionBase, long RegionSize)>();
 
-        while (currentAddress < maxAddress && results.Count < options.MaxMatches)
+        while (currentAddress < maxAddress)
         {
             if (NativeMethods.VirtualQueryEx(processHandle, new IntPtr(currentAddress), out var memoryInfo, new IntPtr(memoryInfoSize)) == IntPtr.Zero)
             {
@@ -219,18 +219,24 @@ internal static class PassiveScanner
 
             if (isReadable && regionSize > 0)
             {
-                ScanRegion(
-                    processHandle,
-                    regionBase,
-                    regionSize,
-                    options,
-                    overlapBytes,
-                    patternSets,
-                    results,
-                    seenKeys);
+                regions.Add((regionBase, regionSize));
             }
 
             currentAddress = nextAddress;
+        }
+
+        for (var index = regions.Count - 1; index >= 0 && results.Count < options.MaxMatches; index -= 1)
+        {
+            var region = regions[index];
+            ScanRegion(
+                processHandle,
+                region.RegionBase,
+                region.RegionSize,
+                options,
+                overlapBytes,
+                patternSets,
+                results,
+                seenKeys);
         }
 
         return results;
