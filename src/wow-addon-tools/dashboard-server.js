@@ -98,8 +98,8 @@ const RESOLVED_QUEUE_STATES = new Set([
   "stale_cached",
 ]);
 const LIVE_APPLICANT_TTL_SECONDS = 5;
-const PASSIVE_EVENT_BATCH_MAX_AGE_MS = 3000;
-const PASSIVE_EVENT_BATCH_MAX_SIZE = 10;
+const PASSIVE_EVENT_BATCH_MAX_AGE_MS = 1000;
+const PASSIVE_EVENT_BATCH_MAX_SIZE = 5;
 
 function toIsoFromUnix(value) {
   return typeof value === "number" ? new Date(value * 1000).toISOString() : null;
