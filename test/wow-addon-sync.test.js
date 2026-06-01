@@ -691,7 +691,7 @@ test("dashboard state merges passive live applicant payloads into the queue and 
           key: "payload:1",
           kind: "payload",
           preview:
-            "LNNRANK|ch=lnnrankf24cf42583|ss=f24cf42583|n=7|rg=us|re=Stormrage|nm=Fernlee|sr=applicant|ai=42|mi=2|ar=HEALER|cl=PRIEST|il=637.4|lv=80",
+            "LNNRANK|ch=lnnrankf24cf42583|ss=f24cf42583|n=7|rg=us|re=Stormrage|nm=Fernlee|sr=applicant|ai=42|gi=42|mi=2|ar=HEALER|cl=PRIEST|il=637.4|lv=80",
           firstSeenAt: "2026-06-01T00:00:10.000Z",
           lastSeenAt: "2026-06-01T00:00:12.000Z",
         },
@@ -705,6 +705,7 @@ test("dashboard state merges passive live applicant payloads into the queue and 
   assert.deepEqual(state.queue[0].sources, ["applicant"]);
   assert.deepEqual(state.queue[0].requestOrigins, ["passive-live"]);
   assert.equal(state.queue[0].applicantID, 42);
+  assert.equal(state.queue[0].groupID, 42);
   assert.equal(state.queue[0].memberIndex, 2);
   assert.equal(state.queue[0].assignedRole, "HEALER");
   assert.equal(state.queue[0].itemLevel, 637.4);
@@ -712,6 +713,7 @@ test("dashboard state merges passive live applicant payloads into the queue and 
   assert.equal(state.applicants[0].characterName, "Fernlee");
   assert.equal(state.applicants[0].source, "applicant");
   assert.equal(state.applicants[0].applicantID, 42);
+  assert.equal(state.applicants[0].groupID, 42);
   assert.equal(state.applicants[0].memberIndex, 2);
   assert.equal(state.applicants[0].assignedRole, "HEALER");
   assert.equal(state.applicants[0].class, "PRIEST");
@@ -725,6 +727,7 @@ test("dashboard state merges passive live applicant payloads into the queue and 
   assert.equal(requests[0].requestSource, "passive-live");
   assert.equal(requests[0].statusSource, "applicant");
   assert.equal(requests[0].applicantID, 42);
+  assert.equal(requests[0].groupID, 42);
   assert.equal(requests[0].memberIndex, 2);
   assert.equal(requests[0].assignedRole, "HEALER");
   assert.equal(requests[0].itemLevel, 637.4);
@@ -1089,6 +1092,8 @@ test("dashboard server snapshot applies live applicants from the newest passive 
     outputDir,
     addonsDir,
     disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
     passiveLiveFeedStateOverride: {
       supported: true,
       status: "ready",
@@ -1191,6 +1196,8 @@ test("dashboard server clears carried LFG applicants when the passive live sessi
     outputDir,
     addonsDir,
     disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
     passiveLiveFeedStateOverride: () => passiveLiveFeedState,
     testHooks,
   });
@@ -1274,6 +1281,8 @@ test("dashboard server prefers timestamped passive events over stale memory entr
     outputDir,
     addonsDir,
     disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
     passiveLiveFeedStateOverride: {
       supported: true,
       status: "ready",
@@ -1374,6 +1383,8 @@ test("clear LFG advances the passive event cursor so older live events stay igno
     outputDir,
     addonsDir,
     disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
     passiveLiveFeedStateOverride: () => passiveLiveFeedState,
   });
 
@@ -1422,6 +1433,118 @@ test("clear LFG advances the passive event cursor so older live events stay igno
     state = await response.json();
     assert.equal(state.applicants.length, 1);
     assert.equal(state.applicants[0].characterName, "Secondone");
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("dashboard server orders same-timestamp passive events by sequence", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-same-ts-sequence-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const eventTimestampMs = Date.now();
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44635",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  let passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    events: [
+      {
+        key: "event-applicant-1",
+        kind: "payload",
+        preview: `LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf44635|n=300|rg=us|re=Stormrage|nm=Firstone|sr=applicant|ai=51|gi=51|mi=1|ar=DAMAGER|cl=ROGUE|il=281.0|lv=90|t=${eventTimestampMs}`,
+        eventAt: "2026-06-01T00:00:10.000Z",
+      },
+    ],
+  };
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+    testHooks,
+  });
+
+  try {
+    const beforeClear = testHooks.snapshotState();
+    assert.equal(beforeClear.applicants.length, 1);
+    assert.equal(beforeClear.applicants[0].characterName, "Firstone");
+
+    passiveLiveFeedState = {
+      supported: true,
+      status: "ready",
+      events: [
+        {
+          key: "event-applicant-1",
+          kind: "payload",
+          preview: `LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf44635|n=300|rg=us|re=Stormrage|nm=Firstone|sr=applicant|ai=51|gi=51|mi=1|ar=DAMAGER|cl=ROGUE|il=281.0|lv=90|t=${eventTimestampMs}`,
+          eventAt: "2026-06-01T00:00:10.000Z",
+        },
+        {
+          key: "event-appclear-2",
+          kind: "payload",
+          preview: `LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf44635|n=301|rg=us|re=Stormrage|nm=Urmomgargles|sr=appclear|t=${eventTimestampMs}`,
+          eventAt: "2026-06-01T00:00:11.000Z",
+        },
+        {
+          key: "event-applicant-3",
+          kind: "payload",
+          preview: `LNNRANK|ch=lnnrank0ff24cf4|ss=f24cf44635|n=302|rg=us|re=Stormrage|nm=Secondone|sr=applicant|ai=52|gi=52|mi=1|ar=HEALER|cl=PRIEST|il=283.5|lv=90|t=${eventTimestampMs}`,
+          eventAt: "2026-06-01T00:00:12.000Z",
+        },
+      ],
+    };
+
+    const afterClear = testHooks.snapshotState();
+    assert.equal(afterClear.applicants.length, 1);
+    assert.equal(afterClear.applicants[0].characterName, "Secondone");
+    assert.equal(afterClear.applicants[0].groupID, 52);
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

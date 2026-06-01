@@ -125,6 +125,7 @@ local function buildApplicantLookup(applicantID, memberIndex)
         characterName = name,
         source = "applicant",
         applicantID = applicantID,
+        groupID = applicantID,
         memberIndex = memberIndex,
         class = class,
         localizedClass = localizedClass,
@@ -514,6 +515,7 @@ local function collectApplicants()
                         characterName = name,
                         source = "applicant",
                         applicantID = applicantInfo.applicantID,
+                        groupID = applicantInfo.applicantID,
                         memberIndex = memberIndex,
                         class = class,
                         localizedClass = localizedClass,
@@ -538,6 +540,7 @@ local function collectApplicants()
                         healer = healer == true,
                         damage = damage == true,
                         applicantID = applicantInfo.applicantID,
+                        groupID = applicantInfo.applicantID,
                         memberIndex = memberIndex,
                         lastSeenAt = time(),
                     }

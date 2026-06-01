@@ -41,6 +41,16 @@ local function getNowUnix()
     return 0
 end
 
+local function getNowUnixMs()
+    local seconds = getNowUnix()
+    local preciseSeconds = type(GetTimePreciseSec) == "function" and GetTimePreciseSec() or nil
+    if type(preciseSeconds) == "number" then
+        local fractionalMilliseconds = math.floor((preciseSeconds - math.floor(preciseSeconds)) * 1000)
+        return (seconds * 1000) + fractionalMilliseconds
+    end
+    return seconds * 1000
+end
+
 local function buildPassiveSessionId()
     local guid = sanitizeSegment(UnitGUID("player") or "noguid", 20):lower()
     local now = tostring(getNowUnix())
@@ -291,6 +301,9 @@ local function buildPayload(request)
         if request.applicantID ~= nil then
             table.insert(segments, "ai=" .. sanitizeSegment(request.applicantID, 10))
         end
+        if request.groupID ~= nil then
+            table.insert(segments, "gi=" .. sanitizeSegment(request.groupID, 10))
+        end
         if request.memberIndex ~= nil then
             table.insert(segments, "mi=" .. sanitizeSegment(request.memberIndex, 3))
         end
@@ -307,6 +320,8 @@ local function buildPayload(request)
             table.insert(segments, "lv=" .. sanitizeSegment(request.level, 3))
         end
     end
+
+    table.insert(segments, "t=" .. tostring(getNowUnixMs()))
 
     local payload = table.concat(segments, "|")
 

@@ -170,12 +170,27 @@ function normalizeScanResult(result) {
 
 function extractCanonicalPayload(text) {
   const match = String(text || "").match(
-    /LNNRANK\|ch=[A-Za-z0-9_:=.]{1,30}\|ss=[A-Za-z0-9_:=.]{0,20}\|n=\d{1,10}\|rg=[A-Za-z0-9_:=.]{1,8}\|re=[A-Za-z0-9_:=.]{1,32}\|nm=[A-Za-z0-9_:=.]{1,32}\|sr=[A-Za-z0-9_]{1,16}(?:\|ai=\d{1,10})?(?:\|mi=\d{1,3})?(?:\|ar=[A-Za-z0-9_:=.]{1,16})?(?:\|cl=[A-Za-z0-9_:=.]{1,16})?(?:\|il=\d{1,4}(?:\.\d{1,2})?)?(?:\|lv=\d{1,3})?/u
+    /LNNRANK\|ch=[A-Za-z0-9_:=.]{1,30}\|ss=[A-Za-z0-9_:=.]{0,20}\|n=\d{1,10}\|rg=[A-Za-z0-9_:=.]{1,8}\|re=[A-Za-z0-9_:=.]{1,32}\|nm=[A-Za-z0-9_:=.]{1,32}\|sr=[A-Za-z0-9_]{1,16}(?:\|ai=\d{1,10})?(?:\|gi=\d{1,10})?(?:\|mi=\d{1,3})?(?:\|ar=[A-Za-z0-9_:=.]{1,16})?(?:\|cl=[A-Za-z0-9_:=.]{1,16})?(?:\|il=\d{1,4}(?:\.\d{1,2})?)?(?:\|lv=\d{1,3})?(?:\|t=\d{10,13})?/u
   );
   if (!match) {
     return null;
   }
   return match[0];
+}
+
+function extractPayloadTimestampMs(payload) {
+  const match = String(payload || "").match(/\|t=(\d{10,13})(?:\||$)/u);
+  if (!match) {
+    return null;
+  }
+
+  const rawValue = match[1];
+  const numericValue = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return null;
+  }
+
+  return rawValue.length <= 10 ? numericValue * 1000 : numericValue;
 }
 
 function extractPassiveLiveFeedEntries(scanResult) {
@@ -347,6 +362,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
     discoveryAddresses: [],
     entries: [],
     events: [],
+    lastSearchStartedAtMs: 0,
     currentPromise: null,
   };
 
@@ -361,13 +377,27 @@ function createPassiveLiveFeedMonitor(options = {}) {
     state.discoveryAddresses = [];
     state.entries = [];
     state.events = [];
+    state.lastSearchStartedAtMs = 0;
     state.status = channelName ? "idle" : "waiting";
   }
 
-  function mergeEntries(nextEntries, observedAtIso) {
+  function mergeEntries(nextEntries, observedAtIso, previousSearchStartedAtMs) {
     const merged = new Map(state.entries.map((entry) => [entry.key, entry]));
     const newEvents = [];
     for (const entry of nextEntries) {
+      const payloadTimestampMs =
+        entry.kind === "payload" && typeof entry.preview === "string" ? extractPayloadTimestampMs(entry.preview) : null;
+      if (
+        payloadTimestampMs != null &&
+        Number.isFinite(previousSearchStartedAtMs) &&
+        previousSearchStartedAtMs > 0 &&
+        payloadTimestampMs < previousSearchStartedAtMs
+      ) {
+        continue;
+      }
+
+      const eventAtIso =
+        payloadTimestampMs != null && payloadTimestampMs > 0 ? new Date(payloadTimestampMs).toISOString() : observedAtIso;
       if (entry.encoding === "window" && entry.address) {
         for (const [existingKey, existingEntry] of merged.entries()) {
           if (existingEntry.address === entry.address && existingEntry.encoding !== "window") {
@@ -388,13 +418,14 @@ function createPassiveLiveFeedMonitor(options = {}) {
 
       merged.set(entry.key, {
         ...entry,
+        eventAt: eventAtIso,
         firstSeenAt: observedAtIso,
         lastSeenAt: observedAtIso,
         seenCount: 1,
       });
       newEvents.push({
         ...entry,
-        eventAt: observedAtIso,
+        eventAt: eventAtIso,
       });
     }
 
@@ -466,6 +497,8 @@ function createPassiveLiveFeedMonitor(options = {}) {
     state.status = "scanning";
     state.lastError = null;
     const scanStartedAt = Date.now();
+    const previousSearchStartedAtMs = state.lastSearchStartedAtMs;
+    state.lastSearchStartedAtMs = scanStartedAt;
 
     const run = (async () => {
       const wowProcess = await detectWowProcess();
@@ -496,7 +529,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
           });
       const observedAtIso = new Date().toISOString();
       const nextEntries = extractPassiveLiveFeedEntries(result);
-      mergeEntries(nextEntries, observedAtIso);
+      mergeEntries(nextEntries, observedAtIso, previousSearchStartedAtMs);
       if (shouldRediscover || !state.discoveryAddresses.length) {
         state.discoveryAddresses = selectPassiveAddressCandidates(result);
         state.lastDiscoveredAt = observedAtIso;

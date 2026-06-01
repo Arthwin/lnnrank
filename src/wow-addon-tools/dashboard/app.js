@@ -1197,6 +1197,12 @@ function getLfgEntryStatus(data, entry) {
   const key = entry.key || buildClientCacheKey(entry.region, entry.realm, entry.characterName);
   const status = statusMap.get(key);
   const isQueued = (data.queue || []).some((queueEntry) => queueEntry.key === key);
+  const shouldShowQueued =
+    entry &&
+    (entry.requestOrigin === "passive-live" ||
+      entry.source === "applicant" ||
+      entry.applicantID != null ||
+      entry.groupID != null);
 
   if (entry.record) {
     return status || {
@@ -1218,10 +1224,10 @@ function getLfgEntryStatus(data, entry) {
 
   return (
     status || {
-      state: "waiting",
+      state: shouldShowQueued ? "queued" : "waiting",
       source: entry.source || "applicant",
       updatedAt: entry.lastSeenAt ? new Date(entry.lastSeenAt * 1000).toISOString() : null,
-      message: "Awaiting the next lookup pass.",
+      message: shouldShowQueued ? "Queued for lookup." : "Awaiting the next lookup pass.",
     }
   );
 }
@@ -1253,17 +1259,20 @@ function groupApplicants(entries) {
   const groups = new Map();
 
   for (const entry of entries || []) {
-    const applicantID =
-      entry.applicantID || `solo:${entry.key || buildClientCacheKey(entry.region, entry.realm, entry.characterName)}`;
-    if (!groups.has(applicantID)) {
-      groups.set(applicantID, {
-        applicantID,
+    const groupID =
+      entry.groupID ||
+      entry.groupId ||
+      entry.applicantID ||
+      `solo:${entry.key || buildClientCacheKey(entry.region, entry.realm, entry.characterName)}`;
+    if (!groups.has(groupID)) {
+      groups.set(groupID, {
+        applicantID: groupID,
         entries: [],
         latestSeenAt: 0,
       });
     }
 
-    const group = groups.get(applicantID);
+    const group = groups.get(groupID);
     group.entries.push(entry);
     group.latestSeenAt = Math.max(group.latestSeenAt || 0, entry.lastSeenAt || 0);
   }

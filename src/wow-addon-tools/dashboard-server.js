@@ -98,6 +98,8 @@ const RESOLVED_QUEUE_STATES = new Set([
   "stale_cached",
 ]);
 const LIVE_APPLICANT_TTL_SECONDS = 5;
+const PASSIVE_EVENT_BATCH_MAX_AGE_MS = 3000;
+const PASSIVE_EVENT_BATCH_MAX_SIZE = 10;
 
 function toIsoFromUnix(value) {
   return typeof value === "number" ? new Date(value * 1000).toISOString() : null;
@@ -172,6 +174,20 @@ function parseDecimalField(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseUnixMillisecondsField(value) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return rawValue.length <= 10 ? parsed * 1000 : parsed;
+}
+
 function parsePassivePayload(payload) {
   if (typeof payload !== "string" || !payload.startsWith("LNNRANK|")) {
     return null;
@@ -197,16 +213,19 @@ function parsePassivePayload(payload) {
   }
 
   const sequence = Number.parseInt(fields.n || "", 10);
+  const timestampMs = parseUnixMillisecondsField(fields.t);
   return {
     payload,
     channelName: fields.ch || null,
     sessionId: fields.ss || null,
     sequence: Number.isFinite(sequence) ? sequence : null,
+    timestampMs,
     region: fields.rg || "us",
     realm: fields.re,
     characterName: fields.nm,
     source: normalizePassiveSource(fields.sr) || "passive-live",
     applicantID: parseIntegerField(fields.ai),
+    groupID: parseIntegerField(fields.gi) ?? fields.gi ?? null,
     memberIndex: parseIntegerField(fields.mi),
     assignedRole: fields.ar || null,
     class: fields.cl || null,
@@ -233,13 +252,15 @@ function parsePassiveLiveEntries(passiveLiveFeedState) {
         return null;
       }
       const eventAt = entry.eventAt || entry.firstSeenAt || entry.lastSeenAt || null;
-      const eventAtMs = Date.parse(eventAt || "");
+      const payloadEventAtMs = payload.timestampMs || null;
+      const discoveredEventAtMs = Date.parse(eventAt || "");
+      const eventAtMs = payloadEventAtMs || (Number.isFinite(discoveredEventAtMs) ? discoveredEventAtMs : 0);
       return {
         ...payload,
-        eventAt,
-        eventAtMs: Number.isFinite(eventAtMs) ? eventAtMs : 0,
-        updatedAt: eventAt,
-        lastSeenAt: toUnixSecondsFromIso(eventAt),
+        eventAt: eventAtMs > 0 ? new Date(eventAtMs).toISOString() : eventAt,
+        eventAtMs,
+        updatedAt: eventAtMs > 0 ? new Date(eventAtMs).toISOString() : eventAt,
+        lastSeenAt: eventAtMs > 0 ? Math.floor(eventAtMs / 1000) : toUnixSecondsFromIso(eventAt),
       };
     })
     .filter(Boolean);
@@ -373,6 +394,7 @@ function buildPassiveLiveQueue(passiveLiveFeedState) {
       sessionId: payload.sessionId,
       payload: payload.payload,
       applicantID: payload.applicantID,
+      groupID: payload.groupID,
       memberIndex: payload.memberIndex,
       assignedRole: payload.assignedRole,
       class: payload.class,
@@ -503,6 +525,7 @@ function buildUnifiedQueue(cache, savedQueue, passiveLiveQueue) {
       localizedClass: null,
       assignedRole: null,
       applicantID: null,
+      groupID: null,
       memberIndex: null,
       unitToken: null,
       itemLevel: null,
@@ -521,6 +544,7 @@ function buildUnifiedQueue(cache, savedQueue, passiveLiveQueue) {
     existing.localizedClass = existing.localizedClass || entry.localizedClass || null;
     existing.assignedRole = existing.assignedRole || entry.assignedRole || null;
     existing.applicantID = existing.applicantID || entry.applicantID || null;
+    existing.groupID = existing.groupID || entry.groupID || null;
     existing.memberIndex = existing.memberIndex || entry.memberIndex || null;
     existing.unitToken = existing.unitToken || entry.unitToken || null;
     existing.itemLevel = existing.itemLevel || entry.itemLevel || null;
@@ -658,6 +682,7 @@ function buildSyncRequestsFromQueue(queueEntries) {
     if (entry.localizedClass) request.localizedClass = entry.localizedClass;
     if (entry.assignedRole) request.assignedRole = entry.assignedRole;
     if (entry.applicantID != null) request.applicantID = entry.applicantID;
+    if (entry.groupID != null) request.groupID = entry.groupID;
     if (entry.memberIndex != null) request.memberIndex = entry.memberIndex;
     if (entry.unitToken) request.unitToken = entry.unitToken;
     if (entry.itemLevel != null) request.itemLevel = entry.itemLevel;
@@ -716,11 +741,23 @@ async function createDashboardServer(options = {}) {
   const passiveLiveFeedMonitor =
     options.enablePassiveLiveFeed === true ? createPassiveLiveFeedMonitor(options.passiveLiveFeedOptions) : null;
   const passiveLiveFeedStateOverride = options.passiveLiveFeedStateOverride;
+  const passiveEventBatchMaxAgeMs = Math.max(
+    0,
+    Number.parseInt(String(options.passiveEventBatchMaxAgeMs ?? PASSIVE_EVENT_BATCH_MAX_AGE_MS), 10) ||
+      PASSIVE_EVENT_BATCH_MAX_AGE_MS
+  );
+  const passiveEventBatchMaxSize = Math.max(
+    1,
+    Number.parseInt(String(options.passiveEventBatchMaxSize ?? PASSIVE_EVENT_BATCH_MAX_SIZE), 10) ||
+      PASSIVE_EVENT_BATCH_MAX_SIZE
+  );
   const lfgRuntime = {
     entries: new Map(),
     lastSavedVariablesModifiedMs: null,
     lastPassiveSequence: 0,
+    lastPassiveEventSequence: 0,
     lastPassiveEventAtMs: 0,
+    pendingPassiveEvents: [],
     passiveSessionKey: null,
     latestLiveEventAtMs: 0,
   };
@@ -734,6 +771,106 @@ async function createDashboardServer(options = {}) {
 
   function resetLfgRuntimeState() {
     lfgRuntime.entries.clear();
+    lfgRuntime.pendingPassiveEvents = [];
+  }
+
+  function buildPassiveEventIdentity(entry) {
+    return [
+      Number((entry && entry.eventAtMs) || 0),
+      Number((entry && entry.sequence) || 0),
+      String((entry && entry.payload) || ""),
+    ].join(":");
+  }
+
+  function comparePassiveEventOrder(left, right) {
+    const leftEventAtMs = Number((left && left.eventAtMs) || 0);
+    const rightEventAtMs = Number((right && right.eventAtMs) || 0);
+    if (leftEventAtMs !== rightEventAtMs) {
+      return leftEventAtMs - rightEventAtMs;
+    }
+
+    const leftSequence = Number((left && left.sequence) || 0);
+    const rightSequence = Number((right && right.sequence) || 0);
+    if (leftSequence !== rightSequence) {
+      return leftSequence - rightSequence;
+    }
+
+    return String((left && left.payload) || "").localeCompare(String((right && right.payload) || ""), "en-US");
+  }
+
+  function isAfterPassiveCursor(entry) {
+    const eventAtMs = Number((entry && entry.eventAtMs) || 0);
+    const sequence = Number((entry && entry.sequence) || 0);
+    const cursorEventAtMs = Number(lfgRuntime.lastPassiveEventAtMs || 0);
+    const cursorSequence = Number(lfgRuntime.lastPassiveEventSequence || 0);
+    if (eventAtMs !== cursorEventAtMs) {
+      return eventAtMs > cursorEventAtMs;
+    }
+    return sequence > cursorSequence;
+  }
+
+  function queuePendingPassiveEvent(entry, queuedAtMs) {
+    if (!entry || !isAfterPassiveCursor(entry)) {
+      return false;
+    }
+
+    const key = buildPassiveEventIdentity(entry);
+    if (lfgRuntime.pendingPassiveEvents.some((pendingEntry) => pendingEntry.key === key)) {
+      return false;
+    }
+
+    lfgRuntime.pendingPassiveEvents.push({
+      key,
+      event: entry,
+      queuedAtMs,
+    });
+    return true;
+  }
+
+  function advancePassiveCursor(entry) {
+    lfgRuntime.lastPassiveEventAtMs = Number((entry && entry.eventAtMs) || 0);
+    lfgRuntime.lastPassiveEventSequence = Number((entry && entry.sequence) || 0);
+  }
+
+  function flushPendingPassiveEvents(nowMs, force = false) {
+    if (!Array.isArray(lfgRuntime.pendingPassiveEvents) || lfgRuntime.pendingPassiveEvents.length === 0) {
+      return;
+    }
+
+    const oldestQueuedAtMs = Number(lfgRuntime.pendingPassiveEvents[0].queuedAtMs || 0);
+    const shouldFlush =
+      force ||
+      lfgRuntime.pendingPassiveEvents.length >= passiveEventBatchMaxSize ||
+      (oldestQueuedAtMs > 0 && nowMs - oldestQueuedAtMs >= passiveEventBatchMaxAgeMs);
+    if (!shouldFlush) {
+      return;
+    }
+
+    const pendingEvents = [...lfgRuntime.pendingPassiveEvents]
+      .map((entry) => entry.event)
+      .sort(comparePassiveEventOrder);
+    lfgRuntime.pendingPassiveEvents = [];
+
+    for (const entry of pendingEvents) {
+      const sequence = Number(entry.sequence || 0);
+      if (!Number.isFinite(sequence) || !isAfterPassiveCursor(entry)) {
+        continue;
+      }
+
+      if (entry.source === "appclear") {
+        lfgRuntime.entries.clear();
+      } else if (entry.source === "applicant") {
+        upsertLfgRuntimeEntry(entry, "passive-live");
+      }
+
+      lfgRuntime.lastPassiveSequence = Math.max(lfgRuntime.lastPassiveSequence, sequence);
+      advancePassiveCursor(entry);
+      lfgRuntime.latestLiveEventAtMs = Math.max(
+        lfgRuntime.latestLiveEventAtMs,
+        Number(entry.eventAtMs || 0),
+        Date.parse(entry.updatedAt || "") || 0
+      );
+    }
   }
 
   function normalizeLfgRuntimeEntry(entry, origin) {
@@ -842,44 +979,25 @@ async function createDashboardServer(options = {}) {
       resetLfgRuntimeState();
       lfgRuntime.passiveSessionKey = passiveSessionKey;
       lfgRuntime.lastPassiveSequence = 0;
+      lfgRuntime.lastPassiveEventSequence = 0;
+      lfgRuntime.lastPassiveEventAtMs = 0;
     }
 
+    const nowMs = Date.now();
     const liveEvents = selectPassiveLiveEvents(passiveBridge, passiveLiveFeedState)
       .filter((entry) => entry.source === "applicant" || entry.source === "appclear")
-      .filter((entry) => Number(entry.eventAtMs || 0) > Number(lfgRuntime.lastPassiveEventAtMs || 0))
-      .sort((left, right) => {
-        const leftEventAtMs = Number(left.eventAtMs || 0);
-        const rightEventAtMs = Number(right.eventAtMs || 0);
-        if (leftEventAtMs !== rightEventAtMs) {
-          return leftEventAtMs - rightEventAtMs;
-        }
-        const leftSequence = Number(left.sequence || 0);
-        const rightSequence = Number(right.sequence || 0);
-        if (leftSequence !== rightSequence) {
-          return leftSequence - rightSequence;
-        }
-        return String(left.payload || "").localeCompare(String(right.payload || ""), "en-US");
-      });
+      .sort(comparePassiveEventOrder);
 
+    let sawNewEvent = false;
     for (const entry of liveEvents) {
-      const sequence = Number(entry.sequence || 0);
-      if (!Number.isFinite(sequence) || sequence <= lfgRuntime.lastPassiveSequence) {
-        continue;
-      }
+      sawNewEvent = queuePendingPassiveEvent(entry, nowMs) || sawNewEvent;
+    }
 
-      if (entry.source === "appclear") {
-        resetLfgRuntimeState();
-      } else {
-        upsertLfgRuntimeEntry(entry, "passive-live");
-      }
-
-      lfgRuntime.lastPassiveSequence = sequence;
-      lfgRuntime.lastPassiveEventAtMs = Math.max(lfgRuntime.lastPassiveEventAtMs, Number(entry.eventAtMs || 0));
-      lfgRuntime.latestLiveEventAtMs = Math.max(
-        lfgRuntime.latestLiveEventAtMs,
-        Number(entry.eventAtMs || 0),
-        Date.parse(entry.updatedAt || "") || 0
-      );
+    const shouldForceFlush =
+      liveEvents.some((entry) => entry.source === "appclear") ||
+      lfgRuntime.pendingPassiveEvents.length >= passiveEventBatchMaxSize;
+    if (sawNewEvent || lfgRuntime.pendingPassiveEvents.length > 0) {
+      flushPendingPassiveEvents(nowMs, shouldForceFlush);
     }
   }
 
@@ -1194,15 +1312,20 @@ async function createDashboardServer(options = {}) {
 
       if (request.method === "POST" && requestUrl.pathname === "/api/lfg/clear") {
         const savedVariables = loadSavedVariablesSnapshot(accountRoot);
-      if (savedVariables && savedVariables.lastModifiedMs != null) {
-        lfgRuntime.lastSavedVariablesModifiedMs = savedVariables.lastModifiedMs;
-      }
-      resetLfgRuntimeState();
-      lfgRuntime.lastPassiveEventAtMs = Date.now();
-      lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, lfgRuntime.lastPassiveEventAtMs);
+        if (savedVariables && savedVariables.file) {
+          clearLnnrankSavedVariablesApplicants(savedVariables.file);
+          lfgRuntime.lastSavedVariablesModifiedMs = fs.statSync(savedVariables.file).mtimeMs;
+        } else if (savedVariables && savedVariables.lastModifiedMs != null) {
+          lfgRuntime.lastSavedVariablesModifiedMs = savedVariables.lastModifiedMs;
+        }
 
-      jsonResponse(response, 200, {
-        ok: true,
+        resetLfgRuntimeState();
+        lfgRuntime.lastPassiveEventAtMs = Date.now();
+        lfgRuntime.lastPassiveEventSequence = Number.MAX_SAFE_INTEGER;
+        lfgRuntime.latestLiveEventAtMs = Math.max(lfgRuntime.latestLiveEventAtMs, lfgRuntime.lastPassiveEventAtMs);
+
+        jsonResponse(response, 200, {
+          ok: true,
           state: snapshotState(),
         });
         return;
