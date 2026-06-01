@@ -242,7 +242,7 @@ end
 local function buildPayload(request)
     publishSequence = publishSequence + 1
 
-    local payload = table.concat({
+    local segments = {
         PAYLOAD_PREFIX:sub(1, #PAYLOAD_PREFIX - 1),
         "ch=" .. sanitizeSegment(passiveChannelName or "", 30),
         "ss=" .. sanitizeSegment(passiveSessionId or "", 20),
@@ -251,7 +251,30 @@ local function buildPayload(request)
         "re=" .. sanitizeSegment(request.realm, 32),
         "nm=" .. sanitizeSegment(request.characterName, 32),
         "sr=" .. sanitizeSegment(request.source, 16),
-    }, "|")
+    }
+
+    if request.source == "applicant" then
+        if request.applicantID ~= nil then
+            table.insert(segments, "ai=" .. sanitizeSegment(request.applicantID, 10))
+        end
+        if request.memberIndex ~= nil then
+            table.insert(segments, "mi=" .. sanitizeSegment(request.memberIndex, 3))
+        end
+        if request.assignedRole ~= nil then
+            table.insert(segments, "ar=" .. sanitizeSegment(request.assignedRole, 16))
+        end
+        if request.class ~= nil then
+            table.insert(segments, "cl=" .. sanitizeSegment(request.class, 16))
+        end
+        if type(request.itemLevel) == "number" then
+            table.insert(segments, "il=" .. sanitizeSegment(string.format("%.1f", request.itemLevel), 8))
+        end
+        if request.level ~= nil then
+            table.insert(segments, "lv=" .. sanitizeSegment(request.level, 3))
+        end
+    end
+
+    local payload = table.concat(segments, "|")
 
     if #payload > 240 then
         payload = payload:sub(1, 240)

@@ -25,21 +25,20 @@
                     <button id="clearQueueButton" class="danger queue-clear-button" type="button">Clear Queue</button>
                   </div>
                 </div>
+                <div id="queueWorkerStatus" class="queue-worker-status"></div>
                 <div id="queueList" class="list"></div>
               </section>
 
               <section class="card search-results-card">
                 <div class="card-head">
-                  <div class="search-results-head">
+                  <div class="queue-card-head-top">
                     <h2>Cached Results</h2>
-                    <div id="resultsPaginationTop" class="pager"></div>
+                    <button id="clearResultsButton" class="danger compact-toolbar-button" type="button">Clear Cache</button>
                   </div>
-                  <div id="searchResultsSummary" class="search-summary-row search-summary-row-inline"></div>
                 </div>
 
                 <div class="panel-toolbar toolbar-row search-toolbar">
                   <input id="resultSearch" type="search" placeholder="Search cached characters..." />
-                  <button id="clearResultsButton" class="danger compact-toolbar-button" type="button">Clear Cache</button>
                 </div>
 
                 <div class="table-wrap">
@@ -47,7 +46,7 @@
                     <thead>
                       <tr>
                         <th><button class="table-sort" type="button" data-sort-column="character">Character</button></th>
-                        <th><button class="table-sort" type="button" data-sort-column="blendedPercent">Total Avg Score</button></th>
+                        <th><button class="table-sort" type="button" data-sort-column="blendedPercent">lññ score</button></th>
                         <th><button class="table-sort" type="button" data-sort-column="averageParse">Avg Parse</button></th>
                         <th><button class="table-sort" type="button" data-sort-column="score">Score</button></th>
                         <th><button class="table-sort" type="button" data-sort-column="updatedAt">Updated</button></th>
@@ -56,6 +55,8 @@
                     <tbody id="resultsBody"></tbody>
                   </table>
                 </div>
+
+                <div id="resultsFooter" class="results-footer pager"></div>
               </section>
             </div>
           </div>
@@ -73,6 +74,24 @@
           <div id="passiveView" class="panel-stack"></div>
         </section>
       </main>
+    </div>
+
+    <div id="confirmModal" class="modal-shell" hidden aria-hidden="true">
+      <div class="modal-backdrop" data-confirm-dismiss></div>
+      <section
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirmModalTitle"
+        aria-describedby="confirmModalMessage"
+      >
+        <h2 id="confirmModalTitle">Clear cached results?</h2>
+        <p id="confirmModalMessage">This removes all cached character results from the local app.</p>
+        <div class="modal-actions">
+          <button id="confirmCancelButton" data-confirm-dismiss type="button">Cancel</button>
+          <button id="confirmAcceptButton" class="danger" type="button">Clear Cache</button>
+        </div>
+      </section>
     </div>
 
     <script src="/app.js"></script>

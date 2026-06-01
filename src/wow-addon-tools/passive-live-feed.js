@@ -9,7 +9,7 @@ const HELPER_PROJECT_PATH = path.join(__dirname, "passive-live-scanner", "Passiv
 const HELPER_SOURCE_PATH = path.join(__dirname, "passive-live-scanner", "Program.cs");
 const HELPER_OUTPUT_DIR = path.join(REPO_ROOT, "output", "passive-live-scanner");
 const HELPER_DLL_PATH = path.join(HELPER_OUTPUT_DIR, "PassiveLiveScanner.dll");
-const DEFAULT_SCAN_INTERVAL_MS = 4000;
+const DEFAULT_SCAN_INTERVAL_MS = 1500;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 25000;
 const DEFAULT_READ_TIMEOUT_MS = 3000;
 const DEFAULT_MAX_MATCHES = 4;
@@ -168,14 +168,12 @@ function normalizeScanResult(result) {
 
 function extractCanonicalPayload(text) {
   const match = String(text || "").match(
-    /LNNRANK\|ch=([A-Za-z0-9_:=.]{1,30})\|ss=([A-Za-z0-9_:=.]{1,20})\|n=(\d{1,10})\|rg=([A-Za-z0-9_:=.]{1,8})\|re=([A-Za-z0-9_:=.]{1,32})\|nm=([A-Za-z0-9_:=.]{1,32})\|sr=([A-Za-z0-9_]{1,16})/u
+    /LNNRANK\|ch=[A-Za-z0-9_:=.]{1,30}\|ss=[A-Za-z0-9_:=.]{1,20}\|n=\d{1,10}\|rg=[A-Za-z0-9_:=.]{1,8}\|re=[A-Za-z0-9_:=.]{1,32}\|nm=[A-Za-z0-9_:=.]{1,32}\|sr=[A-Za-z0-9_]{1,16}(?:\|ai=\d{1,10})?(?:\|mi=\d{1,3})?(?:\|ar=[A-Za-z0-9_:=.]{1,16})?(?:\|cl=[A-Za-z0-9_:=.]{1,16})?(?:\|il=\d{1,4}(?:\.\d{1,2})?)?(?:\|lv=\d{1,3})?/u
   );
   if (!match) {
     return null;
   }
-
-  const [, channelName, sessionId, sequence, region, realm, characterName, source] = match;
-  return `LNNRANK|ch=${channelName}|ss=${sessionId}|n=${sequence}|rg=${region}|re=${realm}|nm=${characterName}|sr=${source}`;
+  return match[0];
 }
 
 function extractPassiveLiveFeedEntries(scanResult) {

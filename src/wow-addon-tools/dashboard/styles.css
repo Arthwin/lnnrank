@@ -156,61 +156,6 @@ button:hover {
   margin-top: 0.35rem;
 }
 
-.search-summary-row {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.55rem;
-}
-
-.search-summary-row-inline {
-  margin-top: 0.7rem;
-}
-
-.search-summary-chip {
-  min-width: 0;
-  padding: 0.55rem 0.7rem;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid var(--line);
-}
-
-.search-summary-chip.is-ok {
-  background: rgba(45, 127, 65, 0.08);
-}
-
-.search-summary-chip.is-warn {
-  background: rgba(224, 106, 60, 0.08);
-}
-
-.search-summary-chip.is-bad {
-  background: rgba(182, 59, 59, 0.1);
-}
-
-.search-summary-label {
-  display: block;
-  color: var(--muted);
-  font-size: 0.68rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  line-height: 1.15;
-}
-
-.search-summary-value {
-  display: block;
-  margin-top: 0.12rem;
-  font-size: 0.9rem;
-  line-height: 1.18;
-  word-break: break-word;
-}
-
-.search-summary-meta {
-  display: block;
-  margin-top: 0.18rem;
-  color: var(--muted);
-  font-size: 0.72rem;
-  line-height: 1.2;
-}
-
 .tabs {
   display: flex;
   gap: 0.75rem;
@@ -367,15 +312,34 @@ th {
   min-width: 0;
 }
 
-.search-results-head {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: 1rem;
+.queue-worker-status {
+  margin-bottom: 0.85rem;
 }
 
-.search-results-head h2 {
-  margin: 0;
+.queue-worker-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  min-width: 0;
+  padding: 0.55rem 0.75rem;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--line);
+}
+
+.queue-worker-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.queue-worker-meta {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
 }
 
 .search-toolbar {
@@ -383,16 +347,13 @@ th {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
+  margin-top: 0.55rem;
   margin-bottom: 0.8rem;
 }
 
 .search-toolbar input[type="search"] {
   flex: 1 1 16rem;
   min-width: 0;
-}
-
-.search-toolbar .compact-toolbar-button {
-  flex: 0 0 auto;
 }
 
 .queue-manual-section {
@@ -547,6 +508,18 @@ th {
 .results-location-meta {
   color: var(--muted);
   font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.results-footer {
+  margin-top: 0.85rem;
+  padding-top: 0.3rem;
+  justify-content: flex-end;
+}
+
+.results-footer-count {
+  color: var(--muted);
+  font-size: 0.88rem;
   font-weight: 600;
 }
 
@@ -1068,6 +1041,58 @@ code {
   border: 1px dashed var(--line);
 }
 
+body.has-modal {
+  overflow: hidden;
+}
+
+.modal-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.modal-shell[hidden] {
+  display: none !important;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(31, 42, 34, 0.38);
+  backdrop-filter: blur(8px);
+}
+
+.modal-card {
+  position: relative;
+  width: min(100%, 28rem);
+  padding: 1.2rem 1.2rem 1rem;
+  border-radius: 24px;
+  background: rgba(248, 243, 232, 0.96);
+  border: 1px solid rgba(87, 96, 81, 0.12);
+  box-shadow: 0 24px 64px rgba(31, 42, 34, 0.18);
+}
+
+.modal-card h2 {
+  margin: 0;
+}
+
+.modal-card p {
+  margin: 0.65rem 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.7rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 980px) {
   .summary-grid,
   .queue-layout {
@@ -1096,13 +1121,12 @@ code {
     flex-wrap: wrap;
   }
 
-  .search-results-head {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .pager {
     justify-content: flex-start;
+  }
+
+  .results-footer {
+    justify-content: flex-end;
   }
 }
 
@@ -1122,10 +1146,6 @@ code {
     padding: 0.75rem 0.55rem;
   }
 
-  .search-summary-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .passive-head-compact,
   .passive-log-head,
   .passive-log-row-head {
@@ -1138,5 +1158,9 @@ code {
     white-space: normal;
     text-align: left;
     justify-content: start;
+  }
+
+  .modal-card {
+    width: min(100%, 100%);
   }
 }

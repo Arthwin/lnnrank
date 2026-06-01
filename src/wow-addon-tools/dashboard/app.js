@@ -64,6 +64,9 @@ const state = {
   resultSortDirection: "desc",
 };
 
+let confirmModalAction = null;
+let confirmModalReturnFocus = null;
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -555,8 +558,8 @@ function loadPersistedViewState() {
   const activeTab = normalizeTabId(params.get("tab")) || normalizeTabId(saved.activeTab) || "lfg";
   const resultSearch = params.get("q") != null ? params.get("q") : saved.resultSearch || "";
   const resultsPage = parsePositiveInt(params.get("rp") || saved.resultsPage, 1);
-  const resultSort = normalizeSortColumn(params.get("sort") || saved.resultSort);
-  const resultSortDirection = normalizeSortDirection(params.get("dir") || saved.resultSortDirection);
+  const resultSort = params.has("sort") ? normalizeSortColumn(params.get("sort")) : "updatedAt";
+  const resultSortDirection = params.has("dir") ? normalizeSortDirection(params.get("dir")) : "desc";
 
   state.activeTab = activeTab;
   state.resultSearch = resultSearch;
@@ -643,26 +646,6 @@ function getStatusMap(data) {
   return entries;
 }
 
-function getRecordStatus(statusMap, record) {
-  const key = record.key || buildClientCacheKey(record.region, record.realm, record.name);
-  return statusMap.get(key) || {
-    state: "stored",
-    source: null,
-    updatedAt: record.updatedAt,
-    message: "Known locally, but not from a recent successful lookup status.",
-  };
-}
-
-function createSearchSummaryChip(label, value, tone = "", options = {}) {
-  return `
-    <article class="search-summary-chip${tone ? ` ${tone}` : ""}">
-      <span class="search-summary-label">${escapeHtml(label)}</span>
-      <strong class="search-summary-value">${escapeHtml(value)}</strong>
-      ${options.meta ? `<span class="search-summary-meta">${escapeHtml(options.meta)}</span>` : ""}
-    </article>
-  `;
-}
-
 function renderSearchSummary(data) {
   const sync = data.autoSync || {};
   const syncLabel = sync.isRunning ? "Running" : sync.lastError ? "Attention" : "Idle";
@@ -693,6 +676,52 @@ function renderSearchSummary(data) {
       { meta: workerMeta }
     ),
   ].join("");
+}
+
+function formatWorkerMeta(sync) {
+  if (sync.isRunning) {
+    return [
+      sync.mode || "auto",
+      sync.currentLookup && (sync.currentLookup.characterName || sync.currentLookup.name)
+        ? `${sync.currentLookup.characterName || sync.currentLookup.name}${sync.currentLookup.realm ? `-${sync.currentLookup.realm}` : ""}`
+        : "working",
+    ].join(" / ");
+  }
+
+  if (sync.lastError) {
+    return `${sync.mode || "auto"} / last run failed`;
+  }
+
+  if (sync.lastFinishedAt) {
+    return `${sync.mode || "auto"} / ${formatShortDate(sync.lastFinishedAt)}`;
+  }
+
+  return sync.mode || "auto";
+}
+
+function renderQueueWorker(data) {
+  const sync = data.autoSync || {};
+  const syncLabel = sync.isRunning ? "Running" : sync.lastError ? "Attention" : "Idle";
+  const target = document.getElementById("queueWorkerStatus");
+  target.innerHTML = `
+    <div class="queue-worker-strip">
+      <span class="queue-worker-label">Worker</span>
+      <span class="pill ${statusPill(sync.isRunning ? "running" : sync.lastError ? "error" : "idle")}">${escapeHtml(syncLabel)}</span>
+      <span class="queue-worker-meta">${escapeHtml(formatWorkerMeta(sync))}</span>
+    </div>
+  `;
+}
+
+function createResultsFooterMarkup(filteredCount, totalCount, currentPage, totalPages) {
+  const countLabel = state.resultSearch
+    ? `${formatCompactNumber(filteredCount, 0)} of ${formatCompactNumber(totalCount, 0)} cached`
+    : `${formatCompactNumber(totalCount, 0)} cached`;
+  const pagerMarkup = totalPages > 1 ? createPagerMarkup("results", currentPage, totalPages) : "";
+
+  return `
+    <span class="results-footer-count">${escapeHtml(countLabel)}</span>
+    ${pagerMarkup}
+  `;
 }
 
 function compareText(left, right) {
@@ -754,8 +783,8 @@ function renderResults(data) {
   persistViewState();
 
   const resultsBody = document.getElementById("resultsBody");
-  const pagerMarkup = createPagerMarkup("results", paged.page, paged.totalPages);
-  document.getElementById("resultsPaginationTop").innerHTML = pagerMarkup;
+  const resultsFooter = document.getElementById("resultsFooter");
+  resultsFooter.innerHTML = createResultsFooterMarkup(rows.length, data.records.length, paged.page, paged.totalPages);
   document.querySelectorAll("[data-sort-column]").forEach((button) => {
     const label = button.dataset.sortLabel || button.textContent.trim();
     button.dataset.sortLabel = label;
@@ -848,7 +877,7 @@ function formatPassiveLiveStatus(liveFeed) {
 
 function parsePassivePayloadEnvelope(payload) {
   const match = String(payload || "").match(
-    /^LNNRANK\|ch=([^|]+)\|ss=([^|]+)\|n=(\d+)\|rg=([^|]+)\|re=([^|]+)\|nm=([^|]+)\|sr=([^|]+)$/u
+    /^LNNRANK\|ch=([^|]+)\|ss=([^|]+)\|n=(\d+)\|rg=([^|]+)\|re=([^|]+)\|nm=([^|]+)\|sr=([^|]+)(?:\|.*)?$/u
   );
   if (!match) {
     return null;
@@ -1221,11 +1250,11 @@ function renderAll() {
     return;
   }
 
-  renderSearchSummary(state.data);
+  renderQueueWorker(state.data);
   renderResults(state.data);
   renderQueue(state.data);
   renderPassive(state.data);
-  renderRosterList("applicantList", state.data.applicants, "No LFG applicants in the last WoW snapshot.", state.data);
+  renderRosterList("applicantList", state.data.applicants, "No live LFG applicants right now.", state.data);
   applyActiveTab();
 }
 
@@ -1247,6 +1276,59 @@ async function removeQueue(key) {
     method: "DELETE",
   });
   await loadState();
+}
+
+function isConfirmModalOpen() {
+  const modal = document.getElementById("confirmModal");
+  return Boolean(modal && !modal.hidden);
+}
+
+function closeConfirmModal(options = {}) {
+  const modal = document.getElementById("confirmModal");
+  if (!modal) {
+    return;
+  }
+
+  modal.hidden = true;
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("has-modal");
+  confirmModalAction = null;
+
+  if (options.restoreFocus !== false && confirmModalReturnFocus && typeof confirmModalReturnFocus.focus === "function") {
+    confirmModalReturnFocus.focus();
+  }
+  confirmModalReturnFocus = null;
+}
+
+function openConfirmModal(config) {
+  const modal = document.getElementById("confirmModal");
+  if (!modal) {
+    return;
+  }
+
+  confirmModalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  confirmModalAction = config.onConfirm || null;
+  document.getElementById("confirmModalTitle").textContent = config.title;
+  document.getElementById("confirmModalMessage").textContent = config.message;
+  document.getElementById("confirmAcceptButton").textContent = config.confirmLabel || "Confirm";
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("has-modal");
+  window.requestAnimationFrame(() => {
+    document.getElementById("confirmAcceptButton").focus();
+  });
+}
+
+function requestClearResultsCache() {
+  openConfirmModal({
+    title: "Clear cached results?",
+    message: "This removes all cached character results from the local app cache. Pending queue entries stay intact.",
+    confirmLabel: "Clear Cache",
+    onConfirm: () => {
+      closeConfirmModal({ restoreFocus: false });
+      void clearResultsCache();
+    },
+  });
 }
 
 async function clearQueue() {
@@ -1387,12 +1469,42 @@ function bindEvents() {
   const clearResultsButton = document.getElementById("clearResultsButton");
   if (clearResultsButton) {
     clearResultsButton.addEventListener("click", () => {
-      void clearResultsCache();
+      requestClearResultsCache();
+    });
+  }
+
+  const confirmCancelButton = document.getElementById("confirmCancelButton");
+  if (confirmCancelButton) {
+    confirmCancelButton.addEventListener("click", () => {
+      closeConfirmModal();
+    });
+  }
+
+  const confirmAcceptButton = document.getElementById("confirmAcceptButton");
+  if (confirmAcceptButton) {
+    confirmAcceptButton.addEventListener("click", () => {
+      if (typeof confirmModalAction === "function") {
+        confirmModalAction();
+      } else {
+        closeConfirmModal();
+      }
     });
   }
 
   document.body.addEventListener("click", (event) => {
-    const sortButton = event.target.closest("[data-sort-column]");
+    const clickTarget =
+      event.target instanceof Element ? event.target : event.target && event.target.parentElement ? event.target.parentElement : null;
+    if (!clickTarget) {
+      return;
+    }
+
+    const confirmDismissTarget = clickTarget.closest("[data-confirm-dismiss]");
+    if (confirmDismissTarget) {
+      closeConfirmModal();
+      return;
+    }
+
+    const sortButton = clickTarget.closest("[data-sort-column]");
     if (sortButton) {
       const nextColumn = normalizeSortColumn(sortButton.dataset.sortColumn);
       if (state.resultSort === nextColumn) {
@@ -1409,9 +1521,15 @@ function bindEvents() {
       return;
     }
 
-    const removeButton = event.target.closest("[data-remove-queue]");
+    const removeButton = clickTarget.closest("[data-remove-queue]");
     if (removeButton) {
       void removeQueue(removeButton.dataset.removeQueue);
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && isConfirmModalOpen()) {
+      closeConfirmModal();
     }
   });
 }
@@ -1422,4 +1540,4 @@ applyActiveTab();
 void loadState();
 setInterval(() => {
   void loadState();
-}, 4000);
+}, 2000);

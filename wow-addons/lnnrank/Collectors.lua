@@ -6,6 +6,7 @@ end
 
 local scanFrame = CreateFrame("Frame")
 local scanScheduled = false
+local APPLICANT_HEARTBEAT_SECONDS = 3
 
 local function splitFullName(fullName)
     if type(fullName) ~= "string" or fullName == "" then
@@ -518,6 +519,10 @@ local function collectApplicants()
                     applicantGroups[index][memberIndex] = applicantLookup
                     applicantGroupsById[applicantInfo.applicantID][memberIndex] = applicantLookup
 
+                    if type(addon.TryPublishRequestToPassiveChannel) == "function" then
+                        addon.TryPublishRequestToPassiveChannel(applicantLookup)
+                    end
+
                     if addon.ShouldAutoQueueLookup(region, realm, name) then
                         queueLookup(region, realm, name, "applicant", applicantLookup)
                     end
@@ -548,6 +553,12 @@ function addon.ScheduleCollectors(delaySeconds)
     C_Timer.After(delaySeconds or 0.25, addon.RunCollectors)
 end
 
+local function shouldRunApplicantHeartbeat()
+    return addon.ShouldScanApplicants() and
+        type(addon.IsPassiveChannelEnabled) == "function" and
+        addon.IsPassiveChannelEnabled()
+end
+
 scanFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 scanFrame:RegisterEvent("LFG_LIST_ACTIVE_ENTRY_UPDATE")
 scanFrame:RegisterEvent("LFG_LIST_APPLICANT_LIST_UPDATED")
@@ -566,3 +577,11 @@ scanFrame:SetScript("OnEvent", function(_, event)
 
     addon.ScheduleCollectors(0.25)
 end)
+
+if type(C_Timer) == "table" and type(C_Timer.NewTicker) == "function" then
+    C_Timer.NewTicker(APPLICANT_HEARTBEAT_SECONDS, function()
+        if shouldRunApplicantHeartbeat() then
+            addon.ScheduleCollectors(0)
+        end
+    end)
+end

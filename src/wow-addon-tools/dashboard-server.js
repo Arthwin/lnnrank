@@ -96,6 +96,7 @@ const RESOLVED_QUEUE_STATES = new Set([
   "rate_limited",
   "stale_cached",
 ]);
+const LIVE_APPLICANT_TTL_SECONDS = 5;
 
 function toIsoFromUnix(value) {
   return typeof value === "number" ? new Date(value * 1000).toISOString() : null;
@@ -160,6 +161,16 @@ function toUnixSecondsFromIso(value) {
   return Number.isFinite(parsedMs) ? Math.floor(parsedMs / 1000) : null;
 }
 
+function parseIntegerField(value) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseDecimalField(value) {
+  const parsed = Number.parseFloat(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function parsePassivePayload(payload) {
   if (typeof payload !== "string" || !payload.startsWith("LNNRANK|")) {
     return null;
@@ -194,6 +205,12 @@ function parsePassivePayload(payload) {
     realm: fields.re,
     characterName: fields.nm,
     source: normalizePassiveSource(fields.sr) || "passive-live",
+    applicantID: parseIntegerField(fields.ai),
+    memberIndex: parseIntegerField(fields.mi),
+    assignedRole: fields.ar || null,
+    class: fields.cl || null,
+    itemLevel: parseDecimalField(fields.il),
+    level: parseIntegerField(fields.lv),
   };
 }
 
@@ -251,6 +268,12 @@ function buildPassiveLiveQueue(passiveLiveFeedState) {
       channelName: payload.channelName,
       sessionId: payload.sessionId,
       payload: payload.payload,
+      applicantID: payload.applicantID,
+      memberIndex: payload.memberIndex,
+      assignedRole: payload.assignedRole,
+      class: payload.class,
+      itemLevel: payload.itemLevel,
+      level: payload.level,
     };
 
     queueEntries.set(key, pickPreferredPassiveQueueEntry(queueEntries.get(key), candidate));
@@ -258,6 +281,26 @@ function buildPassiveLiveQueue(passiveLiveFeedState) {
 
   return [...queueEntries.values()].sort((left, right) =>
     String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""), "en-US")
+  );
+}
+
+function filterActivePassiveLiveQueue(passiveLiveQueue, nowMs) {
+  const applicantCutoff = Math.floor(nowMs / 1000) - LIVE_APPLICANT_TTL_SECONDS;
+  return (passiveLiveQueue || []).filter((entry) => {
+    if (entry.source !== "applicant") {
+      return true;
+    }
+    return Number(entry.lastSeenAt || 0) >= applicantCutoff;
+  });
+}
+
+function shouldPreferLiveApplicants(passiveBridge, passiveLiveFeedState) {
+  return Boolean(
+    passiveBridge &&
+      passiveBridge.enabled === true &&
+      passiveLiveFeedState &&
+      passiveLiveFeedState.supported !== false &&
+      (passiveLiveFeedState.status === "ready" || passiveLiveFeedState.lastScannedAt)
   );
 }
 
@@ -399,12 +442,16 @@ function buildDashboardState(options = {}) {
   const accountRoot = options.accountRoot
     ? path.resolve(String(options.accountRoot))
     : DEFAULT_WOW_ACCOUNT_ROOT;
+  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
   const cache = loadCache(dbPath);
   const savedVariables = loadSavedVariablesSnapshot(accountRoot);
-  const passiveLiveQueue = buildPassiveLiveQueue(options.passiveLiveFeedState);
+  const passiveBridge = normalizePassiveBridge(savedVariables.parsed.passiveBridge);
+  const passiveLiveQueue = filterActivePassiveLiveQueue(buildPassiveLiveQueue(options.passiveLiveFeedState), nowMs);
   const queue = buildUnifiedQueue(cache, savedVariables.parsed.requests || [], passiveLiveQueue);
   const liveApplicants = passiveLiveQueue.filter((entry) => entry.source === "applicant");
-  const applicants = mergeCharacterEntries(savedVariables.parsed.applicants, liveApplicants);
+  const applicants = shouldPreferLiveApplicants(passiveBridge, options.passiveLiveFeedState)
+    ? liveApplicants
+    : mergeCharacterEntries(savedVariables.parsed.applicants, liveApplicants);
 
   return {
     meta: {
@@ -415,7 +462,7 @@ function buildDashboardState(options = {}) {
         savedVariables.lastModifiedMs == null
           ? null
           : new Date(savedVariables.lastModifiedMs).toISOString(),
-      updatedAt: new Date().toISOString(),
+      updatedAt: new Date(nowMs).toISOString(),
       recordCount: listCachedRecords(cache).length,
       queueCount: queue.length,
     },
@@ -429,7 +476,7 @@ function buildDashboardState(options = {}) {
     queue,
     groupMembers: enrichCharacters(savedVariables.parsed.groupMembers, cache),
     applicants: enrichCharacters(applicants, cache),
-    passiveBridge: normalizePassiveBridge(savedVariables.parsed.passiveBridge),
+    passiveBridge,
     passiveLiveFeed: options.passiveLiveFeedState || null,
     autoSync: options.autoSyncState || {
       isRunning: false,
@@ -516,7 +563,7 @@ async function createDashboardServer(options = {}) {
   const provider = options.provider || null;
   const syncRequests = options.runAddonRequestSync || runAddonRequestSync;
   const backgroundTickMs =
-    options.backgroundTickMs == null ? 5000 : Number.parseInt(String(options.backgroundTickMs), 10);
+    options.backgroundTickMs == null ? 2000 : Number.parseInt(String(options.backgroundTickMs), 10);
   const autoSync = {
     currentPromise: null,
     isRunning: false,

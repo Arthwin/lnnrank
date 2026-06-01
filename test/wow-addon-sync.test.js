@@ -553,6 +553,26 @@ test("live feed extraction trims noisy payload previews to the canonical envelop
   );
 });
 
+test("live feed extraction preserves applicant metadata in canonical payloads", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xBEEF",
+        encoding: "window",
+        previewUtf8:
+          "noise....LNNRANK|ch=lnnrankf24cf42583|ss=f24cf42583|n=8|rg=us|re=Stormrage|nm=Fernlee|sr=applicant|ai=42|mi=2|ar=HEALER|cl=PRIEST|il=637.4|lv=80.more noise",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(
+    entries[0].preview,
+    "LNNRANK|ch=lnnrankf24cf42583|ss=f24cf42583|n=8|rg=us|re=Stormrage|nm=Fernlee|sr=applicant|ai=42|mi=2|ar=HEALER|cl=PRIEST|il=637.4|lv=80"
+  );
+});
+
 test("dashboard state merges passive live applicant payloads into the queue and LFG view", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-passive-state-"));
   const accountRoot = path.join(tempDir, "Account");
@@ -593,21 +613,32 @@ test("dashboard state merges passive live applicant payloads into the queue and 
           key: "payload:1",
           kind: "payload",
           preview:
-            "LNNRANK|ch=lnnrankf24cf42583|ss=f24cf42583|n=7|rg=us|re=Stormrage|nm=Fernlee|sr=applicant",
+            "LNNRANK|ch=lnnrankf24cf42583|ss=f24cf42583|n=7|rg=us|re=Stormrage|nm=Fernlee|sr=applicant|ai=42|mi=2|ar=HEALER|cl=PRIEST|il=637.4|lv=80",
           firstSeenAt: "2026-06-01T00:00:10.000Z",
           lastSeenAt: "2026-06-01T00:00:12.000Z",
         },
       ],
     },
+    nowMs: Date.parse("2026-06-01T00:00:15.000Z"),
   });
 
   assert.equal(state.meta.queueCount, 1);
   assert.equal(state.queue.length, 1);
   assert.deepEqual(state.queue[0].sources, ["applicant"]);
   assert.deepEqual(state.queue[0].requestOrigins, ["passive-live"]);
+  assert.equal(state.queue[0].applicantID, 42);
+  assert.equal(state.queue[0].memberIndex, 2);
+  assert.equal(state.queue[0].assignedRole, "HEALER");
+  assert.equal(state.queue[0].itemLevel, 637.4);
   assert.equal(state.applicants.length, 1);
   assert.equal(state.applicants[0].characterName, "Fernlee");
   assert.equal(state.applicants[0].source, "applicant");
+  assert.equal(state.applicants[0].applicantID, 42);
+  assert.equal(state.applicants[0].memberIndex, 2);
+  assert.equal(state.applicants[0].assignedRole, "HEALER");
+  assert.equal(state.applicants[0].class, "PRIEST");
+  assert.equal(state.applicants[0].itemLevel, 637.4);
+  assert.equal(state.applicants[0].level, 80);
   assert.equal(state.applicants[0].lastSeenAt, 1780272012);
 
   const requests = buildSyncRequestsFromQueue(state.queue);
@@ -615,6 +646,74 @@ test("dashboard state merges passive live applicant payloads into the queue and 
   assert.equal(requests[0].requestOrigin, "passive-live");
   assert.equal(requests[0].requestSource, "passive-live");
   assert.equal(requests[0].statusSource, "applicant");
+  assert.equal(requests[0].applicantID, 42);
+  assert.equal(requests[0].memberIndex, 2);
+  assert.equal(requests[0].assignedRole, "HEALER");
+  assert.equal(requests[0].itemLevel, 637.4);
+  assert.equal(requests[0].level, 80);
+});
+
+test("dashboard state expires stale passive live applicants when live mode is active", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-passive-expire-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {',
+      '    ["us:stormrage:fernlee"] = {',
+      '      ["region"] = "us",',
+      '      ["realm"] = "Stormrage",',
+      '      ["characterName"] = "Fernlee",',
+      '      ["source"] = "applicant",',
+      '      ["applicantID"] = 42,',
+      "    },",
+      "  },",
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrankf24cf42583",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const state = buildDashboardState({
+    dbPath,
+    accountRoot,
+    passiveLiveFeedState: {
+      supported: true,
+      status: "ready",
+      lastScannedAt: "2026-06-01T00:00:30.000Z",
+      entries: [
+        {
+          key: "payload:1",
+          kind: "payload",
+          preview:
+            "LNNRANK|ch=lnnrankf24cf42583|ss=f24cf42583|n=7|rg=us|re=Stormrage|nm=Fernlee|sr=applicant|ai=42|mi=2",
+          firstSeenAt: "2026-06-01T00:00:00.000Z",
+          lastSeenAt: "2026-06-01T00:00:01.000Z",
+        },
+      ],
+    },
+    nowMs: Date.parse("2026-06-01T00:00:20.000Z"),
+  });
+
+  assert.equal(state.queue.length, 0);
+  assert.equal(state.applicants.length, 0);
 });
 
 test("dev runtime bootstraps an isolated dashboard sandbox inside the chosen root", () => {
