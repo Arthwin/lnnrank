@@ -343,7 +343,7 @@ internal static class PassiveScanner
             currentAddress = nextAddress;
         }
 
-        for (var index = regions.Count - 1; index >= 0 && results.Count < options.MaxMatches; index -= 1)
+        for (var index = 0; index < regions.Count && results.Count < options.MaxMatches; index += 1)
         {
             var region = regions[index];
             ScanRegion(
