@@ -526,6 +526,14 @@ th {
   font-weight: 600;
 }
 
+.results-force-button {
+  justify-self: start;
+  padding: 0.28rem 0.5rem;
+  font-size: 0.68rem;
+  line-height: 1;
+  box-shadow: none;
+}
+
 .results-footer {
   margin-top: 0.85rem;
   padding-top: 0.3rem;

@@ -364,6 +364,7 @@ function normalizeRequestEntry(input = {}) {
     realm,
     characterName,
     source: input.source || "manual",
+    force: input.force === true || input.forceRefresh === true,
     createdAt: input.createdAt || new Date().toISOString(),
     updatedAt: input.updatedAt || new Date().toISOString(),
   };

@@ -870,6 +870,14 @@ function renderResults(data) {
               <a class="wcl-character-link results-name-link" href="${escapeHtml(buildWclCharacterUrl(record))}" target="_blank" rel="noreferrer noopener"${nameStyle}>${escapeHtml(record.name)}</a>
               ${roleLabel ? `<div class="results-role-meta">${roleLabel}</div>` : ""}
               <div class="results-location-meta">${escapeHtml(locationParts.join(" "))}</div>
+              <button
+                class="secondary results-force-button"
+                type="button"
+                data-force-search="true"
+                data-force-region="${escapeHtml(record.region || "us")}"
+                data-force-realm="${escapeHtml(record.realm)}"
+                data-force-name="${escapeHtml(record.name)}"
+              >Force Search</button>
             </div>
           </td>
           <td><span class="tone-value ${toneClassForBlendedPerformance(record, averageParse)}">${escapeHtml(formatPercentMetric(blendedPercent))}</span></td>
@@ -1262,12 +1270,6 @@ function getLfgEntryStatus(data, entry) {
   const key = entry.key || buildClientCacheKey(entry.region, entry.realm, entry.characterName);
   const status = statusMap.get(key);
   const isQueued = (data.queue || []).some((queueEntry) => queueEntry.key === key);
-  const shouldShowQueued =
-    entry &&
-    (entry.requestOrigin === "passive-live" ||
-      entry.source === "applicant" ||
-      entry.applicantID != null ||
-      entry.groupID != null);
 
   if (entry.record) {
     return status || {
@@ -1289,10 +1291,10 @@ function getLfgEntryStatus(data, entry) {
 
   return (
     status || {
-      state: shouldShowQueued ? "queued" : "waiting",
+      state: "waiting",
       source: entry.source || "applicant",
       updatedAt: entry.lastSeenAt ? new Date(entry.lastSeenAt * 1000).toISOString() : null,
-      message: shouldShowQueued ? "Queued for lookup." : "Awaiting the next lookup pass.",
+      message: "Awaiting the next lookup pass.",
     }
   );
 }
@@ -1600,6 +1602,36 @@ async function clearLfgApplicants() {
   }
 }
 
+async function forceSearchCharacter({ region, realm, name }, button = null) {
+  if (!realm || !name) {
+    return;
+  }
+
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Queued";
+  }
+
+  try {
+    await fetch("/api/manual-queue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        region: region || "us",
+        realm,
+        name,
+        force: true,
+      }),
+    });
+    await loadState();
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Force Search";
+    }
+  }
+}
+
 async function clearLiveLog() {
   const button = document.querySelector("[data-clear-live-log]");
   if (button) {
@@ -1781,6 +1813,19 @@ function bindEvents() {
       if (state.data) {
         renderResults(state.data);
       }
+      return;
+    }
+
+    const forceButton = clickTarget.closest("[data-force-search]");
+    if (forceButton) {
+      void forceSearchCharacter(
+        {
+          region: forceButton.dataset.forceRegion || "us",
+          realm: forceButton.dataset.forceRealm,
+          name: forceButton.dataset.forceName,
+        },
+        forceButton
+      );
       return;
     }
 

@@ -57,6 +57,10 @@ function pushStatus(cache, statusEntries, request, state, message) {
     message,
     source: request.statusSource || request.requestSource || "savedvariables",
     updatedAt: formatIsoTimestamp(),
+    retryCount:
+      state === "error"
+        ? Math.max(0, Number.isFinite(Number(request.retryCount)) ? Number(request.retryCount) : 0)
+        : null,
   };
   statusEntries.push(status);
   upsertRequestStatus(cache, status);
@@ -151,7 +155,8 @@ async function runAddonRequestSync(options = {}) {
       roleHint: normalizeRoleHint(request.assignedRole || request.role || null),
       classNameHint: request.localizedClass || request.class || null,
     };
-    const freshCached = getFreshCachedRecord(cache, lookup);
+    const forceLookup = request.force === true || request.forceRefresh === true;
+    const freshCached = forceLookup ? null : getFreshCachedRecord(cache, lookup);
     const needsWebEnrichment = freshCached && recordNeedsWebEnrichment(freshCached);
     const needsWclMetadataBackfill =
       freshCached &&

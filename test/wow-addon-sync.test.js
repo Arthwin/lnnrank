@@ -395,7 +395,7 @@ test("lookup queue dedupes repeated character requests by normalized key", () =>
   assert.equal(buildLookupQueueKey({ region: "us", realm: "Anub'arak", name: "Romanov" }), "us:anubarak:romanov");
 });
 
-test("queue builder treats error statuses as handled until a new request arrives", () => {
+test("queue builder requeues error statuses up to two retries", () => {
   const cache = {
     records: {},
     manualRequests: {
@@ -420,6 +420,11 @@ test("queue builder treats error statuses as handled until a new request arrives
     providerState: {},
   };
 
+  const retryable = buildUnifiedQueue(cache, []);
+  assert.equal(retryable.length, 1);
+  assert.equal(retryable[0].characterName, "Browserreusetestone");
+
+  cache.requestStatuses["us:stormrage:browserreusetestone"].retryCount = 2;
   const hidden = buildUnifiedQueue(cache, []);
   assert.equal(hidden.length, 0);
 
@@ -498,6 +503,64 @@ test("cache loader canonicalizes legacy punctuation keys and queue builder prese
   assert.deepEqual(visible[0].sources, ["world"]);
 });
 
+test("force manual requests bypass handled cache state and stay deduped", () => {
+  const key = buildCacheKey("us", "Stormrage", "Forceone");
+  const cache = {
+    records: {
+      [key]: {
+        region: "us",
+        realm: "Stormrage",
+        name: "Forceone",
+        score: 3000,
+        dungeons: [],
+        updatedAt: "2026-05-31T02:55:00.000Z",
+      },
+    },
+    manualRequests: {},
+    requestStatuses: {
+      [key]: {
+        key,
+        region: "us",
+        realm: "Stormrage",
+        name: "Forceone",
+        state: "cached",
+        updatedAt: "2026-05-31T03:00:05.000Z",
+      },
+    },
+    providerState: {},
+  };
+
+  upsertManualRequest(cache, {
+    region: "us",
+    realm: "Stormrage",
+    characterName: "Forceone",
+    updatedAt: "2026-05-31T03:00:00.000Z",
+  });
+  assert.equal(buildUnifiedQueue(cache, []).length, 0);
+
+  upsertManualRequest(cache, {
+    region: "us",
+    realm: "Stormrage",
+    characterName: "Forceone",
+    force: true,
+    updatedAt: "2026-05-31T03:01:00.000Z",
+  });
+  upsertManualRequest(cache, {
+    region: "us",
+    realm: "stormrage",
+    characterName: "forceone",
+    force: true,
+    updatedAt: "2026-05-31T03:01:10.000Z",
+  });
+
+  const queue = buildUnifiedQueue(cache, []);
+  assert.equal(listManualRequests(cache).length, 1);
+  assert.equal(queue.length, 1);
+  assert.equal(queue[0].force, true);
+  assert.equal(queue[0].record.score, 3000);
+  assert.equal(buildSyncRequestsFromQueue(queue)[0].force, true);
+});
+
 test("sync request builder reuses the exact queue snapshot shown in the app", () => {
   const requests = buildSyncRequestsFromQueue([
     {
@@ -520,6 +583,20 @@ test("sync request builder reuses the exact queue snapshot shown in the app", ()
       seenCount: 2,
       sources: ["world"],
       requestOrigins: ["manual"],
+    },
+    {
+      key: "us:area52:retryme",
+      region: "us",
+      realm: "Area52",
+      characterName: "Retryme",
+      requestTimestamp: "2026-05-31T04:55:00.000Z",
+      lastSeenAt: 1780203300,
+      seenCount: 1,
+      sources: ["applicant"],
+      status: {
+        state: "error",
+        retryCount: 1,
+      },
     },
   ]);
 
@@ -546,6 +623,19 @@ test("sync request builder reuses the exact queue snapshot shown in the app", ()
     updatedAt: "2026-05-31T04:54:00.000Z",
     lastSeenAt: 1780203240,
     seenCount: 2,
+  });
+  assert.deepEqual(requests[2], {
+    key: "us:area52:retryme",
+    region: "us",
+    realm: "Area52",
+    characterName: "Retryme",
+    requestOrigin: "savedvariables",
+    requestSource: "applicant",
+    statusSource: "applicant",
+    updatedAt: "2026-05-31T04:55:00.000Z",
+    lastSeenAt: 1780203300,
+    seenCount: 1,
+    retryCount: 2,
   });
 });
 
@@ -2634,6 +2724,13 @@ test("dashboard applies grouped LFG heartbeat batches from passive live events",
       snapshot.applicants.map((entry) => `${entry.characterName}-${entry.realm}:${entry.groupID}`),
       ["Clickedone-Stormrage:11", "Queuedtwo-Thrall:12"]
     );
+    assert.deepEqual(
+      snapshot.queue.map((entry) => `${entry.characterName}-${entry.realm}`),
+      ["Queuedtwo-Thrall"]
+    );
+    const queuedtwo = snapshot.queue.find((entry) => entry.characterName === "Queuedtwo");
+    assert.equal(queuedtwo.sources.includes("applicant"), true);
+    assert.equal(queuedtwo.requestOrigins.includes("passive-live"), true);
     const clickedone = snapshot.applicants.find((entry) => entry.characterName === "Clickedone");
     assert.equal(clickedone.class, "DEMONHUNTER");
     assert.equal(clickedone.assignedRole, "DAMAGER");

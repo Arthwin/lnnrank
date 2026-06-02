@@ -162,6 +162,25 @@ const LIVE_APPLICANT_TTL_SECONDS = 5;
 const PASSIVE_EVENT_BATCH_MAX_AGE_MS = 1000;
 const PASSIVE_EVENT_BATCH_MAX_SIZE = 5;
 const PASSIVE_BROKER_EVENT_LIMIT = 400;
+const MAX_QUEUE_ERROR_RETRIES = 2;
+
+function getStatusRetryCount(status) {
+  const retryCount = Number(status && status.retryCount);
+  return Number.isFinite(retryCount) && retryCount > 0 ? retryCount : 0;
+}
+
+function isRetryableQueueErrorStatus(status) {
+  return Boolean(status && status.state === "error" && getStatusRetryCount(status) < MAX_QUEUE_ERROR_RETRIES);
+}
+
+function isResolvedQueueStatus(status, requestUpdatedAtMs) {
+  if (!status || !RESOLVED_QUEUE_STATES.has(status.state) || isRetryableQueueErrorStatus(status)) {
+    return false;
+  }
+
+  const statusUpdatedAtMs = Date.parse(status.updatedAt || "");
+  return Number.isFinite(statusUpdatedAtMs) && Number.isFinite(requestUpdatedAtMs) && statusUpdatedAtMs >= requestUpdatedAtMs;
+}
 
 function createPassiveLogCursor(timestampMs = 0, sequence = 0) {
   return {
@@ -623,6 +642,7 @@ function buildUnifiedQueue(cache, savedQueue, passiveLiveQueue) {
       unitToken: null,
       itemLevel: null,
       level: null,
+      force: false,
     };
 
     existing.region = existing.region || region;
@@ -642,6 +662,7 @@ function buildUnifiedQueue(cache, savedQueue, passiveLiveQueue) {
     existing.unitToken = existing.unitToken || entry.unitToken || null;
     existing.itemLevel = existing.itemLevel || entry.itemLevel || null;
     existing.level = existing.level || entry.level || null;
+    existing.force = existing.force || entry.force === true || entry.forceRefresh === true;
     if (!existing.sources.includes(source)) {
       existing.sources.push(source);
     }
@@ -649,14 +670,8 @@ function buildUnifiedQueue(cache, savedQueue, passiveLiveQueue) {
       existing.requestOrigins.push(requestOrigin);
     }
 
-    const statusUpdatedAtMs = Date.parse((existing.status && existing.status.updatedAt) || "");
     const requestTimestampMs = Date.parse(existing.requestTimestamp || "");
-    const wasHandled =
-      existing.status &&
-      RESOLVED_QUEUE_STATES.has(existing.status.state) &&
-      Number.isFinite(statusUpdatedAtMs) &&
-      Number.isFinite(requestTimestampMs) &&
-      statusUpdatedAtMs >= requestTimestampMs;
+    const wasHandled = !existing.force && isResolvedQueueStatus(existing.status, requestTimestampMs);
     existing.needsSync = !wasHandled;
 
     merged.set(key, existing);
@@ -788,6 +803,10 @@ function buildSyncRequestsFromQueue(queueEntries) {
     if (entry.unitToken) request.unitToken = entry.unitToken;
     if (entry.itemLevel != null) request.itemLevel = entry.itemLevel;
     if (entry.level != null) request.level = entry.level;
+    if (entry.force === true || entry.forceRefresh === true) request.force = true;
+    if (entry.status && entry.status.state === "error" && isRetryableQueueErrorStatus(entry.status)) {
+      request.retryCount = getStatusRetryCount(entry.status) + 1;
+    }
     return request;
   });
 }
@@ -1468,9 +1487,11 @@ async function createDashboardServer(options = {}) {
 
     const mergedSources = [...new Set([...(existing.sources || []), ...(candidate.sources || [])])];
     const mergedOrigins = [...new Set([...(existing.requestOrigins || []), ...(candidate.requestOrigins || [])])];
+    const preferred = shouldReplace ? candidate : existing;
+    const fallback = shouldReplace ? existing : candidate;
     passiveQueueRuntime.entries.set(candidate.key, {
-      ...(shouldReplace ? existing : candidate),
-      ...(shouldReplace ? candidate : existing),
+      ...fallback,
+      ...preferred,
       key: candidate.key,
       requestTimestamp: shouldReplace ? candidate.requestTimestamp : existing.requestTimestamp,
       updatedAt: shouldReplace ? candidate.updatedAt : existing.updatedAt,
@@ -1478,6 +1499,50 @@ async function createDashboardServer(options = {}) {
       seenCount: Math.max(Number(existing.seenCount || 0), Number(candidate.seenCount || 0)),
       sources: mergedSources,
       requestOrigins: mergedOrigins,
+      channelName: preferred.channelName || fallback.channelName || null,
+      sessionId: preferred.sessionId || fallback.sessionId || null,
+      payload: preferred.payload || fallback.payload || null,
+      eventId: preferred.eventId || fallback.eventId || null,
+      sequence: preferred.sequence || fallback.sequence || null,
+      assignedRole: preferred.assignedRole || fallback.assignedRole || null,
+      class: preferred.class || fallback.class || null,
+      groupID: preferred.groupID != null ? preferred.groupID : fallback.groupID != null ? fallback.groupID : null,
+      memberIndex:
+        preferred.memberIndex != null ? preferred.memberIndex : fallback.memberIndex != null ? fallback.memberIndex : null,
+      itemLevel: preferred.itemLevel != null ? preferred.itemLevel : fallback.itemLevel != null ? fallback.itemLevel : null,
+      level: preferred.level != null ? preferred.level : fallback.level != null ? fallback.level : null,
+    });
+  }
+
+  function upsertSearchRuntimeEntryFromLfgMember(event, member, resolvedGroupId) {
+    if (!event || !member || !member.characterName || !member.realm) {
+      return;
+    }
+
+    upsertSearchRuntimeEntry({
+      eventType: "search",
+      eventId: `${event.eventId || event.heartbeatId || event.capturedAtMs}:lfg:${member.realm}:${
+        member.characterName
+      }:${member.memberIndex || 0}`,
+      region: event.region || "us",
+      realm: member.realm,
+      characterName: member.characterName,
+      source: "applicant",
+      publisher: event.publisher || "lfg-status",
+      sequence: event.sequence || null,
+      capturedAtMs: Number(event.capturedAtMs || 0),
+      capturedAt: event.capturedAt || null,
+      updatedAt: event.updatedAt || event.capturedAt || null,
+      payload: event.payload || null,
+      channelName: event.channelName || null,
+      sessionId: event.sessionId || null,
+      publisherKey: event.publisherKey || event.channelName || event.sessionId || null,
+      groupID: resolvedGroupId != null ? resolvedGroupId : event.groupID != null ? event.groupID : null,
+      memberIndex: member.memberIndex != null ? member.memberIndex : event.memberIndex || null,
+      assignedRole: member.assignedRole || event.assignedRole || null,
+      class: member.class || event.class || null,
+      itemLevel: member.itemLevel != null ? member.itemLevel : event.itemLevel != null ? event.itemLevel : null,
+      level: member.level != null ? member.level : event.level != null ? event.level : null,
     });
   }
 
@@ -1511,14 +1576,8 @@ async function createDashboardServer(options = {}) {
       }
 
       const status = requestStatuses.get(entry.key) || null;
-      const statusUpdatedAtMs = Date.parse((status && status.updatedAt) || "");
       const requestUpdatedAtMs = Date.parse(entry.updatedAt || entry.requestTimestamp || "");
-      const isResolved =
-        status &&
-        RESOLVED_QUEUE_STATES.has(status.state) &&
-        Number.isFinite(statusUpdatedAtMs) &&
-        Number.isFinite(requestUpdatedAtMs) &&
-        statusUpdatedAtMs >= requestUpdatedAtMs;
+      const isResolved = isResolvedQueueStatus(status, requestUpdatedAtMs);
       if (isResolved) {
         continue;
       }
@@ -1679,6 +1738,7 @@ async function createDashboardServer(options = {}) {
           resolvedGroupId != null
             ? String(resolvedGroupId)
             : `solo:${member.characterName}:${member.realm}:${member.memberIndex || 0}`;
+        upsertSearchRuntimeEntryFromLfgMember(event, member, resolvedGroupId);
         const group = batch.groups.get(groupKey) || {
           groupID: resolvedGroupId,
           capturedAtMs: batch.capturedAtMs,
@@ -2321,6 +2381,7 @@ async function createDashboardServer(options = {}) {
           realm: body.realm,
           characterName: body.name,
           source: "manual",
+          force: body.force === true || body.forceRefresh === true,
           updatedAt,
           eventId: manualEventId,
         });
@@ -2329,9 +2390,10 @@ async function createDashboardServer(options = {}) {
           realm: entry.realm,
           name: entry.characterName,
           state: "queued",
-          message: "Queued from the dashboard.",
+          message: entry.force ? "Force refresh queued from the dashboard." : "Queued from the dashboard.",
           source: entry.source || "manual",
           updatedAt,
+          retryCount: null,
         });
         saveCache(cache, dbPath);
         scheduleAutoSync(100);
