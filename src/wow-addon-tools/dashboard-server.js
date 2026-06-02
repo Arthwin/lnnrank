@@ -110,6 +110,29 @@ const PASSIVE_EVENT_BATCH_MAX_AGE_MS = 1000;
 const PASSIVE_EVENT_BATCH_MAX_SIZE = 5;
 const PASSIVE_BROKER_EVENT_LIMIT = 400;
 
+function createPassiveLogCursor(timestampMs = 0, sequence = 0) {
+  return {
+    timestampMs: Number.isFinite(Number(timestampMs)) ? Number(timestampMs) : 0,
+    sequence: Number.isFinite(Number(sequence)) ? Number(sequence) : 0,
+  };
+}
+
+function comparePassiveLogCursor(left, right) {
+  const leftTimestampMs = Number((left && left.timestampMs) || 0);
+  const rightTimestampMs = Number((right && right.timestampMs) || 0);
+  if (leftTimestampMs !== rightTimestampMs) {
+    return leftTimestampMs - rightTimestampMs;
+  }
+
+  const leftSequence = Number((left && left.sequence) || 0);
+  const rightSequence = Number((right && right.sequence) || 0);
+  return leftSequence - rightSequence;
+}
+
+function maxPassiveLogCursor(left, right) {
+  return comparePassiveLogCursor(left, right) >= 0 ? left : right;
+}
+
 function toIsoFromUnix(value) {
   return typeof value === "number" ? new Date(value * 1000).toISOString() : null;
 }
@@ -739,7 +762,7 @@ async function createDashboardServer(options = {}) {
   const provider = options.provider || null;
   const syncRequests = options.runAddonRequestSync || runAddonRequestSync;
   const backgroundTickMs =
-    options.backgroundTickMs == null ? 2000 : Number.parseInt(String(options.backgroundTickMs), 10);
+    options.backgroundTickMs == null ? 500 : Number.parseInt(String(options.backgroundTickMs), 10);
   const autoSync = {
     currentPromise: null,
     isRunning: false,
@@ -787,6 +810,59 @@ async function createDashboardServer(options = {}) {
     latestLiveEventAtMs: 0,
     ignoreBeforeMs: 0,
   };
+
+  function resolveLatestPassiveLogCursorFromFeedState(passiveLiveFeedState) {
+    let cursor = createPassiveLogCursor();
+    const sourceEntries = [];
+
+    if (passiveLiveFeedState && Array.isArray(passiveLiveFeedState.events)) {
+      sourceEntries.push(...passiveLiveFeedState.events);
+    }
+    if (passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries)) {
+      sourceEntries.push(...passiveLiveFeedState.entries);
+    }
+
+    for (const entry of sourceEntries) {
+      if (!entry || entry.kind !== "payload" || typeof entry.preview !== "string") {
+        continue;
+      }
+
+      const event = parseAddonEventPayload(entry.preview, {
+        fallbackTimestampMs: Date.parse(entry.eventAt || entry.firstSeenAt || entry.lastSeenAt || "") || 0,
+      });
+      if (!event) {
+        continue;
+      }
+
+      cursor = maxPassiveLogCursor(
+        cursor,
+        createPassiveLogCursor(Number(event.capturedAtMs || 0), Number(event.sequence || 0))
+      );
+    }
+
+    return cursor;
+  }
+
+  function clearPassiveLiveLog(feedState) {
+    const clearCursor = resolveLatestPassiveLogCursorFromFeedState(feedState);
+    passiveBrokerRuntime.events = [];
+    passiveBrokerRuntime.pendingEvents = [];
+    const runtimeCursor = createPassiveLogCursor(
+      Number(passiveBrokerRuntime.lastEventAtMs || 0),
+      Number(passiveBrokerRuntime.lastEventSequence || 0)
+    );
+    const nextCursor = maxPassiveLogCursor(runtimeCursor, clearCursor);
+    passiveBrokerRuntime.lastEventAtMs = Number(nextCursor.timestampMs || 0);
+    if (Number(nextCursor.timestampMs || 0) > 0) {
+      passiveBrokerRuntime.lastEventSequence = Number(nextCursor.sequence || 0);
+    }
+
+    if (passiveLiveFeedMonitor && typeof passiveLiveFeedMonitor.clearLog === "function") {
+      passiveLiveFeedMonitor.clearLog(clearCursor);
+    }
+
+    return clearCursor;
+  }
 
   function buildLfgRuntimeKey(entry) {
     if (entry.applicantID != null) {
@@ -890,14 +966,16 @@ async function createDashboardServer(options = {}) {
     );
   }
 
-  function buildBrokeredPassiveLiveFeedState(rawState, passiveLiveScope) {
-    if (!rawState) {
-      return null;
-    }
+function buildBrokeredPassiveLiveFeedState(rawState, passiveLiveScope) {
+  if (!rawState) {
+    return null;
+  }
 
     return {
       ...rawState,
       activeSessionId: passiveLiveScope && passiveLiveScope.sessionId ? passiveLiveScope.sessionId : null,
+      readerEvents: Array.isArray(rawState.events) ? [...rawState.events] : [],
+      readerEventCount: Array.isArray(rawState.events) ? rawState.events.length : 0,
       events: [...passiveBrokerRuntime.events],
       eventCount: passiveBrokerRuntime.events.length,
     };
@@ -1115,12 +1193,9 @@ async function createDashboardServer(options = {}) {
       sawNewEvent = queuePendingPassiveEvent(entry, nowMs) || sawNewEvent;
     }
 
-    const shouldForceFlush =
-      liveEvents.some((entry) => entry.source === "appclear") ||
-      passiveBrokerRuntime.pendingEvents.length >= passiveEventBatchMaxSize;
     const flushedEvents =
       sawNewEvent || passiveBrokerRuntime.pendingEvents.length > 0
-        ? flushPendingPassiveEvents(nowMs, shouldForceFlush)
+        ? flushPendingPassiveEvents(nowMs, true)
         : [];
 
     return {
@@ -1239,13 +1314,17 @@ async function createDashboardServer(options = {}) {
     }
   }
 
-  function buildBrokerLogEvent(event) {
+  function buildBrokerLogEvent(event, receivedAtMs = Date.now()) {
     const eventAt =
       Number(event && event.capturedAtMs) > 0
         ? new Date(event.capturedAtMs).toISOString()
         : event && event.capturedAt
           ? event.capturedAt
           : null;
+    const normalizedReceivedAtMs = Number.isFinite(Number(receivedAtMs)) ? Number(receivedAtMs) : Date.now();
+    const receivedAt = new Date(normalizedReceivedAtMs).toISOString();
+    const delayMs =
+      Number(event && event.capturedAtMs) > 0 ? Math.max(0, normalizedReceivedAtMs - Number(event.capturedAtMs || 0)) : null;
     return {
       id: buildAddonEventIdentity(event),
       key: `event:${buildAddonEventIdentity(event) || buildAddonEventPreview(event)}`,
@@ -1253,8 +1332,11 @@ async function createDashboardServer(options = {}) {
       preview: buildAddonEventPreview(event),
       payload: event && event.payload ? event.payload : buildAddonEventPreview(event),
       eventAt,
-      firstSeenAt: eventAt,
-      lastSeenAt: eventAt,
+      firstSeenAt: receivedAt,
+      lastSeenAt: receivedAt,
+      receivedAt,
+      receivedAtMs: normalizedReceivedAtMs,
+      delayMs,
       seenCount: 1,
       source: event && event.source ? event.source : null,
       eventType: event && event.eventType ? event.eventType : null,
@@ -1836,9 +1918,17 @@ async function createDashboardServer(options = {}) {
       )
       .filter(Boolean);
 
-    const parsedEntryEvents = parsePassivePayloadList(
-      passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : []
+    const readerEventsAuthoritative = Boolean(
+      passiveLiveFeedState &&
+        passiveLiveFeedState.readCursor &&
+        typeof passiveLiveFeedState.readCursor === "object"
     );
+
+    const parsedEntryEvents = readerEventsAuthoritative
+      ? []
+      : parsePassivePayloadList(
+          passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : []
+        );
     const parsedHistoryEvents = parsePassivePayloadList(
       passiveLiveFeedState && Array.isArray(passiveLiveFeedState.events) ? passiveLiveFeedState.events : []
     );
@@ -1928,8 +2018,9 @@ async function createDashboardServer(options = {}) {
         continue;
       }
 
-      passiveBrokerRuntime.seenEventIds.set(identity, Number(event.capturedAtMs || Date.now()));
-      passiveBrokerRuntime.events = [...passiveBrokerRuntime.events, buildBrokerLogEvent(event)].slice(
+      const receivedAtMs = Date.now();
+      passiveBrokerRuntime.seenEventIds.set(identity, Number(event.capturedAtMs || receivedAtMs));
+      passiveBrokerRuntime.events = [...passiveBrokerRuntime.events, buildBrokerLogEvent(event, receivedAtMs)].slice(
         -PASSIVE_BROKER_EVENT_LIMIT
       );
       if (event.eventType === "search") {
@@ -1974,6 +2065,8 @@ async function createDashboardServer(options = {}) {
         ? {
             ...passiveLiveFeedState,
             activeSessionId: passiveLiveScope.activeSessionId || null,
+            readerEvents: Array.isArray(passiveLiveFeedState.events) ? [...passiveLiveFeedState.events] : [],
+            readerEventCount: Array.isArray(passiveLiveFeedState.events) ? passiveLiveFeedState.events.length : 0,
             events: [...passiveBrokerRuntime.events],
             eventCount: passiveBrokerRuntime.events.length,
           }
@@ -2281,6 +2374,18 @@ async function createDashboardServer(options = {}) {
 
         jsonResponse(response, 200, {
           ok: true,
+          state: snapshotState(),
+        });
+        return;
+      }
+
+      if (request.method === "POST" && requestUrl.pathname === "/api/live-log/clear") {
+        await readRequestBody(request);
+        const stateBeforeClear = snapshotState();
+        const clearCursor = clearPassiveLiveLog(stateBeforeClear.passiveLiveFeed);
+        jsonResponse(response, 200, {
+          ok: true,
+          clearCursor,
           state: snapshotState(),
         });
         return;

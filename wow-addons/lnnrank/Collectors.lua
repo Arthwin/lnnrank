@@ -6,7 +6,12 @@ end
 
 local scanFrame = CreateFrame("Frame")
 local scanScheduled = false
-local APPLICANT_HEARTBEAT_SECONDS = 1
+local APPLICANT_POLL_SECONDS = 1
+local lastApplicantRelayStateKey = nil
+local refreshApplicantFrameBindings
+local ACTIVE_APPLICANT_STATUSES = {
+    applied = true,
+}
 
 local function isFrameShown(frame)
     return frame and type(frame.IsShown) == "function" and frame:IsShown()
@@ -22,6 +27,123 @@ local function isApplicantHeartbeatContextActive()
     end
 
     return isFrameShown(LFGListFrame.ApplicationViewer)
+end
+
+local function hasActiveLfgEntry()
+    return type(C_LFGList) == "table" and
+        type(C_LFGList.HasActiveEntryInfo) == "function" and
+        C_LFGList.HasActiveEntryInfo() == true
+end
+
+local function resetApplicantRelayState()
+    lastApplicantRelayStateKey = nil
+end
+
+local function buildApplicantRelayMemberToken(member)
+    if type(member) ~= "table" or not member.characterName or not member.realm then
+        return nil
+    end
+
+    return table.concat({
+        tostring(member.groupID or 0),
+        tostring(member.memberIndex or 0),
+        tostring(member.characterName),
+        tostring(member.realm),
+        tostring(member.class or ""),
+        tostring(member.assignedRole or ""),
+    }, "~")
+end
+
+local function buildApplicantRelayStateKey(region, members)
+    local tokens = {}
+    if type(members) == "table" then
+        for index = 1, #members do
+            local token = buildApplicantRelayMemberToken(members[index])
+            if token and token ~= "" then
+                table.insert(tokens, token)
+            end
+        end
+    end
+
+    table.sort(tokens)
+
+    return table.concat({
+        tostring(region or "us"),
+        tostring(#tokens),
+        #tokens > 0 and table.concat(tokens, "|") or "empty",
+    }, "::")
+end
+
+local function normalizeApplicantStatusValue(value)
+    if type(value) ~= "string" then
+        return nil
+    end
+
+    local normalized = value:lower()
+    if normalized == "" then
+        return nil
+    end
+
+    return normalized
+end
+
+local function shouldIncludeApplicantInfo(applicantInfo)
+    if type(applicantInfo) ~= "table" then
+        return false
+    end
+
+    local applicationStatus = normalizeApplicantStatusValue(applicantInfo.applicationStatus)
+    local pendingStatus = normalizeApplicantStatusValue(applicantInfo.pendingApplicationStatus)
+
+    if pendingStatus and not ACTIVE_APPLICANT_STATUSES[pendingStatus] then
+        return false
+    end
+
+    if applicationStatus and not ACTIVE_APPLICANT_STATUSES[applicationStatus] then
+        return false
+    end
+
+    return applicationStatus == nil or ACTIVE_APPLICANT_STATUSES[applicationStatus] == true
+end
+
+local function maybePublishApplicantRelaySnapshot(region, members, contextActive, options)
+    if type(addon.PublishLfgStatusSnapshot) ~= "function" then
+        return
+    end
+
+    local forceClearWithoutContext = type(options) == "table" and options.forceClearWithoutContext == true
+    if not contextActive and not forceClearWithoutContext then
+        resetApplicantRelayState()
+        return
+    end
+
+    local stateKey = buildApplicantRelayStateKey(region, members)
+    if stateKey == lastApplicantRelayStateKey then
+        return
+    end
+
+    if addon.PublishLfgStatusSnapshot(region, members) then
+        lastApplicantRelayStateKey = stateKey
+        return
+    end
+
+    resetApplicantRelayState()
+end
+
+local function clearApplicantState(region, options)
+    local applicantGroups = {}
+    local applicantGroupsById = {}
+    maybePublishApplicantRelaySnapshot(
+        region,
+        {},
+        type(options) == "table" and options.contextActive == true or isApplicantHeartbeatContextActive(),
+        {
+            forceClearWithoutContext = type(options) == "table" and options.forceClearWithoutContext == true,
+        }
+    )
+    addon.PruneQueuedRequestsBySource("applicant", {})
+    addon.ReplaceSnapshotBucket("applicants", {})
+    refreshApplicantFrameBindings(applicantGroups, applicantGroupsById)
 end
 
 local function splitFullName(fullName)
@@ -370,7 +492,7 @@ local function refreshSearchResultFrameBindings()
     end
 end
 
-local function refreshApplicantFrameBindings(applicantGroups, applicantGroupsById)
+refreshApplicantFrameBindings = function(applicantGroups, applicantGroupsById)
     if not LFGListFrame or
         not LFGListFrame.ApplicationViewer or
         not LFGListFrame.ApplicationViewer.ScrollBox or
@@ -495,23 +617,33 @@ local function collectApplicants()
     local applicantGroupsById = {}
     local heartbeatMembers = {}
     local heartbeatContextActive = isApplicantHeartbeatContextActive()
+    local activeLfgEntry = hasActiveLfgEntry()
 
     if (type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance()) or
         not addon.ShouldScanApplicants() or type(C_LFGList) ~= "table" or type(C_LFGList.GetApplicants) ~= "function" then
-        if type(addon.PublishLfgStatusSnapshot) == "function" and heartbeatContextActive and
-            not (type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance()) then
-            addon.PublishLfgStatusSnapshot(region, heartbeatMembers)
+        if type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance() then
+            resetApplicantRelayState()
+        else
+            clearApplicantState(region, {
+                contextActive = heartbeatContextActive,
+                forceClearWithoutContext = not activeLfgEntry,
+            })
         end
-        addon.PruneQueuedRequestsBySource("applicant", entries)
-        addon.ReplaceSnapshotBucket("applicants", entries)
-        refreshApplicantFrameBindings(applicantGroups, applicantGroupsById)
+        return
+    end
+
+    if not activeLfgEntry then
+        clearApplicantState(region, {
+            contextActive = heartbeatContextActive,
+            forceClearWithoutContext = true,
+        })
         return
     end
 
     local applicants = C_LFGList.GetApplicants() or {}
     for index = 1, #applicants do
         local applicantInfo = C_LFGList.GetApplicantInfo(applicants[index])
-        if applicantInfo and applicantInfo.applicantID and not (type(issecretvalue) == "function" and issecretvalue(applicantInfo.applicantID)) then
+        if shouldIncludeApplicantInfo(applicantInfo) and applicantInfo.applicantID and not (type(issecretvalue) == "function" and issecretvalue(applicantInfo.applicantID)) then
             applicantGroups[index] = applicantGroups[index] or {}
             applicantGroupsById[applicantInfo.applicantID] = applicantGroupsById[applicantInfo.applicantID] or {}
             for memberIndex = 1, applicantInfo.numMembers or 0 do
@@ -534,6 +666,8 @@ local function collectApplicants()
                         level = level,
                         itemLevel = itemLevel,
                         assignedRole = assignedRole,
+                        applicationStatus = applicantInfo.applicationStatus,
+                        pendingApplicationStatus = applicantInfo.pendingApplicationStatus,
                     }
                     entries[requestKey] = {
                         region = region,
@@ -554,6 +688,8 @@ local function collectApplicants()
                         applicantID = applicantInfo.applicantID,
                         groupID = applicantInfo.applicantID,
                         memberIndex = memberIndex,
+                        applicationStatus = applicantInfo.applicationStatus,
+                        pendingApplicationStatus = applicantInfo.pendingApplicationStatus,
                         lastSeenAt = time(),
                     }
                     applicantGroups[index][memberIndex] = applicantLookup
@@ -571,9 +707,7 @@ local function collectApplicants()
         end
     end
 
-    if type(addon.PublishLfgStatusSnapshot) == "function" and (#heartbeatMembers > 0 or heartbeatContextActive) then
-        addon.PublishLfgStatusSnapshot(region, heartbeatMembers)
-    end
+    maybePublishApplicantRelaySnapshot(region, heartbeatMembers, heartbeatContextActive)
     addon.PruneQueuedRequestsBySource("applicant", entries)
     addon.ReplaceSnapshotBucket("applicants", entries)
     refreshApplicantFrameBindings(applicantGroups, applicantGroupsById)
@@ -596,7 +730,7 @@ function addon.ScheduleCollectors(delaySeconds)
     C_Timer.After(delaySeconds or 0.25, addon.RunCollectors)
 end
 
-local function shouldRunApplicantHeartbeat()
+local function shouldRunApplicantPoll()
     return addon.ShouldScanApplicants() and
         not (type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance()) and
         type(addon.IsPassiveChannelEnabled) == "function" and
@@ -604,16 +738,38 @@ local function shouldRunApplicantHeartbeat()
 end
 
 scanFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
+scanFrame:RegisterEvent("LFG_GROUP_DELISTED_LEADERSHIP_CHANGE")
 scanFrame:RegisterEvent("LFG_LIST_ACTIVE_ENTRY_UPDATE")
 scanFrame:RegisterEvent("LFG_LIST_APPLICANT_LIST_UPDATED")
 scanFrame:RegisterEvent("LFG_LIST_APPLICANT_UPDATED")
+scanFrame:RegisterEvent("LFG_LIST_ENTRY_EXPIRED_TIMEOUT")
+scanFrame:RegisterEvent("LFG_LIST_ENTRY_EXPIRED_TOO_MANY_PLAYERS")
 scanFrame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED")
 scanFrame:RegisterEvent("LFG_LIST_SEARCH_RESULT_UPDATED")
 scanFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 scanFrame:RegisterEvent("PLAYER_LOGIN")
 scanFrame:RegisterEvent("PLAYER_ROLES_ASSIGNED")
 scanFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
-scanFrame:SetScript("OnEvent", function(_, event)
+scanFrame:SetScript("OnEvent", function(_, event, ...)
+    if event == "LFG_LIST_ENTRY_EXPIRED_TIMEOUT" or
+        event == "LFG_LIST_ENTRY_EXPIRED_TOO_MANY_PLAYERS" or
+        event == "LFG_GROUP_DELISTED_LEADERSHIP_CHANGE" then
+        clearApplicantState(addon.GetCurrentRegionSlug(), {
+            forceClearWithoutContext = true,
+        })
+        addon.ScheduleCollectors(0)
+        return
+    end
+
+    if event == "LFG_LIST_ACTIVE_ENTRY_UPDATE" then
+        local created = ...
+        if created == false or not hasActiveLfgEntry() then
+            clearApplicantState(addon.GetCurrentRegionSlug(), {
+                forceClearWithoutContext = true,
+            })
+        end
+    end
+
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         addon.ScheduleCollectors(0.5)
         return
@@ -623,9 +779,11 @@ scanFrame:SetScript("OnEvent", function(_, event)
 end)
 
 if type(C_Timer) == "table" and type(C_Timer.NewTicker) == "function" then
-    C_Timer.NewTicker(APPLICANT_HEARTBEAT_SECONDS, function()
-        if shouldRunApplicantHeartbeat() then
+    C_Timer.NewTicker(APPLICANT_POLL_SECONDS, function()
+        if shouldRunApplicantPoll() then
             addon.ScheduleCollectors(0)
+        else
+            resetApplicantRelayState()
         end
     end)
 end

@@ -6,7 +6,7 @@ This repository is the clean local starting point for the `LÑÑRank` Warcraft L
 
 - Keep the shipped behavior **Warcraft Logs only**.
 - Do not reintroduce Raider.IO dependencies, code paths, UI labels, or data assumptions.
-- Do not revive the abandoned passive chat-bridge/logging transport.
+- Treat the passive live relay and in-addon live event log as active supported behavior.
 - Preserve the WoW reload boundary: optimize around it, but do not claim to bypass it.
 
 ## Critical invariants
@@ -46,6 +46,8 @@ This repository is the clean local starting point for the `LÑÑRank` Warcraft L
    - `npm test`
 2. If touching WoW addon Lua:
    - update `wow-addons/lnnrank`
+   - copy the updated addon files into `C:\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns\lnnrank`
+   - keep the repo addon and live WoW addon folder in sync after every addon update
    - keep the runtime behavior unchanged unless intentionally requested
 3. If touching lookup logic:
    - preserve the unified pipeline guarantee

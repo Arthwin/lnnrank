@@ -1,5 +1,18 @@
 "use strict";
 
+const ADDON_TOKEN_PATTERN = "[A-Za-z0-9_:-]";
+const ADDON_MEMBER_TOKEN_PATTERN =
+  "(?:" +
+  `${ADDON_TOKEN_PATTERN}{1,32}~${ADDON_TOKEN_PATTERN}{1,32}~g\\d{1,10}~\\d{1,3}` +
+  `(?:~${ADDON_TOKEN_PATTERN}{1,16}~${ADDON_TOKEN_PATTERN}{1,16})?` +
+  ")";
+
+function normalizeAddonTransportText(value) {
+  return String(value || "")
+    .replace(/\|\|/gu, "|")
+    .replace(/\^/gu, "|");
+}
+
 function normalizeAddonEventSource(source) {
   const normalized = String(source || "").trim().toLocaleLowerCase("en-US");
   if (!normalized) {
@@ -38,34 +51,137 @@ function parseUnixMillisecondsField(value) {
   return rawValue.length <= 10 ? parsed * 1000 : parsed;
 }
 
+function hasAddonField(fields, key) {
+  return Object.prototype.hasOwnProperty.call(fields || {}, key);
+}
+
 const PAYLOAD_FIELD_PATTERNS = {
   v: /^\d{1,2}/u,
   e: /^[A-Za-z0-9_-]{1,16}/u,
   id: /^[A-Za-z0-9_:=-]{1,32}/u,
-  ch: /^[A-Za-z0-9_:=.]{1,30}/u,
-  ss: /^[A-Za-z0-9_:=.]{0,20}/u,
-  pk: /^[A-Za-z0-9_:=.]{1,24}/u,
+  ch: /^[A-Za-z0-9_-]{1,30}/u,
+  ss: /^[A-Za-z0-9_-]{0,20}/u,
+  pk: /^[A-Za-z0-9_-]{1,24}/u,
   n: /^\d{1,10}/u,
   t: /^\d{10,13}/u,
-  rg: /^[A-Za-z0-9_:=.]{1,8}/u,
+  rg: /^[A-Za-z0-9_-]{1,8}/u,
   sr: /^[A-Za-z0-9_-]{1,16}/u,
-  re: /^[A-Za-z0-9_:=.]{1,32}/u,
-  nm: /^[A-Za-z0-9_:=.]{1,32}/u,
+  re: /^[A-Za-z0-9_:-]{1,32}/u,
+  nm: /^[A-Za-z0-9_:-]{1,32}/u,
   ai: /^\d{1,10}/u,
   gi: /^\d{1,10}/u,
   mi: /^\d{1,3}/u,
-  hb: /^[A-Za-z0-9_:=.-]{1,24}/u,
+  hb: /^[A-Za-z0-9_-]{1,24}/u,
   ix: /^\d{1,4}/u,
   tt: /^\d{1,4}/u,
-  ar: /^[A-Za-z0-9_:=.-]{1,16}/u,
-  cl: /^[A-Za-z0-9_:=.-]{1,16}/u,
+  ar: /^[A-Za-z0-9_-]{1,16}/u,
+  cl: /^[A-Za-z0-9_-]{1,16}/u,
   il: /^\d{1,4}(?:\.\d{1,2})?/u,
   lv: /^\d{1,3}/u,
-  m: /^(?:_|[A-Za-z0-9_:=.,~-]{1,512})/u,
+  m: new RegExp(`^(?:_|${ADDON_MEMBER_TOKEN_PATTERN}(?:,${ADDON_MEMBER_TOKEN_PATTERN}){0,31})`, "u"),
 };
 
+function normalizeAddonFields(fields = {}) {
+  const normalized = {};
+  for (const [key, value] of Object.entries(fields || {})) {
+    normalized[key] = String(value || "").trim();
+  }
+  return normalized;
+}
+
+function detectAddonEventType(fields) {
+  const source = normalizeAddonEventSource(fields.sr) || "unknown";
+  const isLegacyClear = !fields.e && source === "appclear";
+  let eventType = String(fields.e || "").trim().toLocaleLowerCase("en-US");
+  if (!eventType) {
+    eventType = isLegacyClear ? "lfg_status" : fields.hb ? "lfg_status" : "search";
+  }
+  return {
+    eventType,
+    source,
+    isLegacyClear,
+  };
+}
+
+function isAddonFieldRemainderAcceptable(key, remainder) {
+  const normalizedRemainder = String(remainder || "");
+  if (!normalizedRemainder) {
+    return true;
+  }
+
+  if (/^(?:\.+.*|\s+.*)$/u.test(normalizedRemainder)) {
+    return true;
+  }
+
+  if (key === "m") {
+    return false;
+  }
+
+  return false;
+}
+
+function isCompleteAddonPayloadFields(fields) {
+  const normalizedFields = normalizeAddonFields(fields);
+  const { eventType, source, isLegacyClear } = detectAddonEventType(normalizedFields);
+
+  if (!normalizedFields.ch || !normalizedFields.rg || !normalizedFields.sr) {
+    return false;
+  }
+
+  if (parseIntegerField(normalizedFields.n) == null) {
+    return false;
+  }
+
+  if (normalizedFields.v) {
+    if (
+      !normalizedFields.e ||
+      !normalizedFields.id ||
+      !normalizedFields.ss ||
+      parseUnixMillisecondsField(normalizedFields.t) == null
+    ) {
+      return false;
+    }
+  }
+
+  if (eventType === "lfg_status") {
+    if (isLegacyClear) {
+      return Boolean(normalizedFields.re && normalizedFields.nm);
+    }
+
+    if (
+      parseUnixMillisecondsField(normalizedFields.hb) == null ||
+      parseIntegerField(normalizedFields.ix) == null ||
+      parseIntegerField(normalizedFields.tt) == null
+    ) {
+      return false;
+    }
+
+    const batchIndex = parseIntegerField(normalizedFields.ix);
+    const batchTotal = parseIntegerField(normalizedFields.tt);
+    if (batchIndex === 0 && batchTotal === 0) {
+      return true;
+    }
+
+    if (normalizedFields.m && normalizedFields.m !== "_") {
+      return true;
+    }
+
+    return Boolean(normalizedFields.re && normalizedFields.nm);
+  }
+
+  if (eventType === "search") {
+    return Boolean(normalizedFields.re && normalizedFields.nm);
+  }
+
+  if (!normalizedFields.v && source === "appclear") {
+    return Boolean(normalizedFields.re && normalizedFields.nm);
+  }
+
+  return false;
+}
+
 function extractCanonicalPayload(text) {
-  const raw = String(text || "");
+  const raw = normalizeAddonTransportText(text);
   const startIndex = raw.indexOf("LNNRANK|");
   if (startIndex < 0) {
     return null;
@@ -77,6 +193,7 @@ function extractCanonicalPayload(text) {
   }
 
   const canonicalSegments = ["LNNRANK"];
+  const canonicalFields = {};
   for (const segment of segments.slice(1)) {
     const separatorIndex = segment.indexOf("=");
     if (separatorIndex <= 0) {
@@ -94,14 +211,24 @@ function extractCanonicalPayload(text) {
       break;
     }
 
+    const remainder = segment.slice(separatorIndex + 1 + valueMatch[0].length);
+    if (!isAddonFieldRemainderAcceptable(key, remainder)) {
+      return null;
+    }
+
     canonicalSegments.push(`${key}=${valueMatch[0]}`);
+    canonicalFields[key] = valueMatch[0];
   }
 
-  return canonicalSegments.length > 1 ? canonicalSegments.join("|") : null;
+  if (canonicalSegments.length <= 1 || !isCompleteAddonPayloadFields(canonicalFields)) {
+    return null;
+  }
+
+  return canonicalSegments.join("|");
 }
 
 function extractPayloadTimestampMs(payload) {
-  const match = String(payload || "").match(/\|t=(\d{10,13})(?:\||$)/u);
+  const match = normalizeAddonTransportText(payload).match(/\|t=(\d{10,13})(?:\||$)/u);
   return match ? parseUnixMillisecondsField(match[1]) : null;
 }
 
@@ -148,12 +275,18 @@ function buildFallbackEventId(fields, eventType, payload) {
 }
 
 function parseAddonEventPayload(payload, options = {}) {
-  if (typeof payload !== "string" || !payload.startsWith("LNNRANK|")) {
+  if (typeof payload !== "string") {
+    return null;
+  }
+
+  const canonicalPayload = extractCanonicalPayload(payload);
+  const normalizedPayload = canonicalPayload || normalizeAddonTransportText(payload);
+  if (!normalizedPayload.startsWith("LNNRANK|")) {
     return null;
   }
 
   const fields = {};
-  for (const segment of payload.split("|").slice(1)) {
+  for (const segment of normalizedPayload.split("|").slice(1)) {
     const separatorIndex = segment.indexOf("=");
     if (separatorIndex <= 0) {
       continue;
@@ -167,23 +300,22 @@ function parseAddonEventPayload(payload, options = {}) {
     fields[key] = value;
   }
 
-  const source = normalizeAddonEventSource(fields.sr) || "unknown";
-  const isLegacyClear = !fields.e && source === "appclear";
-  let eventType = String(fields.e || "").trim().toLocaleLowerCase("en-US");
-  if (!eventType) {
-    eventType = isLegacyClear ? "lfg_status" : fields.hb ? "lfg_status" : "search";
+  if (!isCompleteAddonPayloadFields(fields)) {
+    return null;
   }
+
+  const { eventType, source, isLegacyClear } = detectAddonEventType(fields);
 
   const sequence = parseIntegerField(fields.n);
   const capturedAtMs =
     parseUnixMillisecondsField(fields.t) ||
     (Number.isFinite(options.fallbackTimestampMs) ? options.fallbackTimestampMs : 0);
   const capturedAtIso = capturedAtMs > 0 ? new Date(capturedAtMs).toISOString() : null;
-  const eventId = String(fields.id || "").trim() || buildFallbackEventId(fields, eventType, payload);
+  const eventId = String(fields.id || "").trim() || buildFallbackEventId(fields, eventType, normalizedPayload);
   const common = {
     eventType,
     eventId,
-    payload,
+    payload: normalizedPayload,
     channelName: fields.ch || null,
     sessionId: fields.ss || null,
     playerKey: fields.pk || null,
@@ -312,6 +444,7 @@ module.exports = {
   compareAddonEvents,
   extractCanonicalPayload,
   extractPayloadTimestampMs,
+  normalizeAddonTransportText,
   normalizeAddonEventSource,
   parseAddonEventPayload,
 };

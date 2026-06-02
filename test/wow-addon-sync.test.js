@@ -36,11 +36,15 @@ const {
 } = require("../src/wow-addon-tools/dashboard-server");
 const {
   buildPassiveDiscoveryPattern,
+  buildPassiveDiscoveryPools,
   extractPassiveLiveFeedEntries,
   selectPassiveRegionCandidates,
   selectPassiveAddressCandidates,
 } = require("../src/wow-addon-tools/passive-live-feed");
-const { parseAddonEventPayload } = require("../src/wow-addon-tools/addon-event-format");
+const {
+  normalizeAddonTransportText,
+  parseAddonEventPayload,
+} = require("../src/wow-addon-tools/addon-event-format");
 const {
   buildDevRuntimePaths,
   ensureDevRuntime,
@@ -639,13 +643,102 @@ test("live feed extraction keeps multiple canonical payloads from one memory win
   );
 });
 
+test("live feed extraction normalizes escaped chat transport payloads", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xCAFE",
+        encoding: "window",
+        previewUtf8:
+          "noise....LNNRANK||v=2||e=search||id=s3||ch=lnnrank0ff24cf4||ss=f24cf44941||n=103||t=1780336000003||rg=us||sr=unit||re=Stormrage||nm=Escapedone more noise",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(
+    entries[0].preview,
+    "LNNRANK|v=2|e=search|id=s3|ch=lnnrank0ff24cf4|ss=f24cf44941|n=103|t=1780336000003|rg=us|sr=unit|re=Stormrage|nm=Escapedone"
+  );
+});
+
+test("live feed extraction trims noisy grouped lfg heartbeat payloads to complete member tokens", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xBADA55",
+        encoding: "utf8",
+        previewUtf8:
+          "junk...[01:51:40] #79103 lfg_status lfg-status members=3 [channel-sent].  LNNRANK||v=2||e=lfg_status||id=f24cf45247-79103||ch=lnnrank0ff24cf4||ss=f24cf45247||n=79103||t=1780357900880||rg=us||sr=lfg-status||hb=1780357900880||ix=1||tt=2||m=Caamsado~Azralon~g40~1,Rhub~Ragnaros~g41~1,Crazycalla~Norgannon~g42~1......................",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(
+    entries[0].preview,
+    "LNNRANK|v=2|e=lfg_status|id=f24cf45247-79103|ch=lnnrank0ff24cf4|ss=f24cf45247|n=79103|t=1780357900880|rg=us|sr=lfg-status|hb=1780357900880|ix=1|tt=2|m=Caamsado~Azralon~g40~1,Rhub~Ragnaros~g41~1,Crazycalla~Norgannon~g42~1"
+  );
+});
+
+test("live feed extraction trims noisy search names before trailing memory garbage", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xBADA56",
+        encoding: "utf8",
+        previewUtf8:
+          "junk...LNNRANK||v=2||e=search||id=f24cf45247-79083||ch=lnnrank0ff24cf4||ss=f24cf45247||n=79083||t=1780356771720||rg=us||sr=world||re=Stormrage||nm=Sadrack..........r more junk",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(
+    entries[0].preview,
+    "LNNRANK|v=2|e=search|id=f24cf45247-79083|ch=lnnrank0ff24cf4|ss=f24cf45247|n=79083|t=1780356771720|rg=us|sr=world|re=Stormrage|nm=Sadrack"
+  );
+});
+
+test("live feed extraction ignores incomplete payload fragments", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xBADA57",
+        encoding: "utf8",
+        previewUtf8: "junk...LNNRANK|v=2",
+        previewUtf16: "",
+      },
+      {
+        address: "0xBADA58",
+        encoding: "utf8",
+        previewUtf8:
+          "junk...LNNRANK|v=2|e=lfg_status|id=f24cf45247-79107|ch=lnnrank0ff24cf4|ss=f24cf45247|n=79107|t=1780357946297|rg=us|sr=lfg-status|hb=1780357946297|ix=1|tt=1|m=Rhub~Ragnaros~g41~1,Crazycalla~Norgannon~g42~1,Feralized",
+        previewUtf16: "",
+      },
+      {
+        address: "0xBADA59",
+        encoding: "utf8",
+        previewUtf8:
+          "junk...LNNRANK|v=2|e=lfg_status|id=f24cf45247-79253|ch=lnnrank0|n=79253|t=1780359870462|rg=us|sr=lfg-status|hb=1780359870462|ix=1|tt=1|m=Himmel~QuelThalas~g50~1",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.deepEqual(entries, []);
+});
+
 test("live feed discovery pattern follows the active player channel across reload sessions", () => {
   assert.equal(
     buildPassiveDiscoveryPattern({
       channelName: "lnnrankf24cf42583",
       playerKey: "0ff24cf4",
     }),
-    "ch=lnnrankf24cf42583"
+    "|ch=lnnrankf24cf42583|"
   );
 
   assert.equal(
@@ -653,7 +746,7 @@ test("live feed discovery pattern follows the active player channel across reloa
       channelName: "lnnrank0ff24cf4",
       playerKey: "0ff24cf4",
     }),
-    "ch=lnnrank0ff24cf4"
+    "|ch=lnnrank0ff24cf4|"
   );
 
   assert.equal(
@@ -661,7 +754,37 @@ test("live feed discovery pattern follows the active player channel across reloa
       channelName: "lnnrank0ff24cf4",
       playerKey: "0ff24cf4",
     }),
-    "ch=lnnrank0ff24cf4"
+    "|ch=lnnrank0ff24cf4|"
+  );
+});
+
+test("live feed discovery pools stay channel-scoped", () => {
+  assert.deepEqual(
+    buildPassiveDiscoveryPools({
+      enabled: true,
+      channelName: "lnnrank0ff24cf4",
+      playerKey: "0ff24cf4",
+      sessionId: "f24cf49251",
+    }, "f24cf49251"),
+    [
+      {
+        key: "generic",
+        pattern: "|ch=lnnrank0ff24cf4|",
+        regionLimit: 12,
+        preferredChannelName: "lnnrank0ff24cf4",
+        preferredSessionId: "f24cf49251",
+      },
+    ]
+  );
+
+  assert.equal(
+    buildPassiveDiscoveryPools({
+      enabled: true,
+      channelName: "lnnrank0ff24cf4",
+      playerKey: "0ff24cf4",
+      sessionId: "stale-saved-session",
+    })[0].preferredSessionId,
+    null
   );
 });
 
@@ -688,6 +811,38 @@ test("addon event parser understands grouped LFG heartbeat member tokens", () =>
     class: null,
     assignedRole: null,
   });
+});
+
+test("addon event parser normalizes escaped chat transport payloads", () => {
+  const payload =
+    "LNNRANK||v=2||e=search||id=s4||ch=lnnrank0ff24cf4||ss=f24cf44941||n=104||t=1780336000004||rg=us||sr=applicant||re=Thrall||nm=Escapedtwo||gi=2||mi=1";
+  assert.equal(
+    normalizeAddonTransportText(payload),
+    "LNNRANK|v=2|e=search|id=s4|ch=lnnrank0ff24cf4|ss=f24cf44941|n=104|t=1780336000004|rg=us|sr=applicant|re=Thrall|nm=Escapedtwo|gi=2|mi=1"
+  );
+
+  const event = parseAddonEventPayload(payload);
+  assert.equal(event.eventType, "search");
+  assert.equal(event.characterName, "Escapedtwo");
+  assert.equal(event.realm, "Thrall");
+  assert.equal(event.source, "applicant");
+  assert.equal(event.sequence, 104);
+});
+
+test("addon event parser normalizes caret-delimited chat transport payloads", () => {
+  const payload =
+    "LNNRANK^v=2^e=search^id=s5^ch=lnnrank0ff24cf4^ss=f24cf44941^n=105^t=1780336000005^rg=us^sr=world^re=Stormrage^nm=Caretone";
+  assert.equal(
+    normalizeAddonTransportText(payload),
+    "LNNRANK|v=2|e=search|id=s5|ch=lnnrank0ff24cf4|ss=f24cf44941|n=105|t=1780336000005|rg=us|sr=world|re=Stormrage|nm=Caretone"
+  );
+
+  const event = parseAddonEventPayload(payload);
+  assert.equal(event.eventType, "search");
+  assert.equal(event.characterName, "Caretone");
+  assert.equal(event.realm, "Stormrage");
+  assert.equal(event.source, "world");
+  assert.equal(event.sequence, 105);
 });
 
 test("live feed extraction accepts payloads with an empty passive session id", () => {
@@ -1944,6 +2099,141 @@ test("dashboard broker does not redeliver identical passive events across snapsh
     assert.equal(firstSnapshot.passiveLiveFeed.events.length, 1);
     assert.equal(secondSnapshot.passiveLiveFeed.events.length, 1);
     assert.equal(secondSnapshot.passiveLiveFeed.events[0].preview, firstSnapshot.passiveLiveFeed.events[0].preview);
+    assert.match(firstSnapshot.passiveLiveFeed.events[0].receivedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(typeof firstSnapshot.passiveLiveFeed.events[0].delayMs, "number");
+    assert.ok(firstSnapshot.passiveLiveFeed.events[0].delayMs >= 0);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("dashboard live log clear keeps identical passive payloads from reappearing until a newer event arrives", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-live-log-clear-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const firstTimestampMs = Date.now();
+  const secondTimestampMs = firstTimestampMs + 5000;
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf44635",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  let passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    entries: [
+      {
+        key: "payload:old-search",
+        kind: "payload",
+        preview: `LNNRANK|v=2|e=search|id=f24cf44635-300|ch=lnnrank0ff24cf4|ss=f24cf44635|n=300|t=${firstTimestampMs}|rg=us|sr=world|re=Stormrage|nm=Oldsearch`,
+        firstSeenAt: new Date(firstTimestampMs).toISOString(),
+        lastSeenAt: new Date(firstTimestampMs).toISOString(),
+      },
+    ],
+  };
+
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+
+  try {
+    const port = server.address().port;
+
+    let response = await fetch(`http://127.0.0.1:${port}/api/state`);
+    let state = await response.json();
+    assert.equal(state.passiveLiveFeed.events.length, 1);
+    assert.equal(
+      state.passiveLiveFeed.events[0].preview,
+      `LNNRANK|v=2|e=search|id=f24cf44635-300|ch=lnnrank0ff24cf4|ss=f24cf44635|n=300|t=${firstTimestampMs}|rg=us|sr=world|re=Stormrage|nm=Oldsearch`
+    );
+
+    response = await fetch(`http://127.0.0.1:${port}/api/live-log/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    state = await response.json();
+    assert.equal(state.state.passiveLiveFeed.events.length, 0);
+
+    response = await fetch(`http://127.0.0.1:${port}/api/state`);
+    state = await response.json();
+    assert.equal(state.passiveLiveFeed.events.length, 0);
+
+    passiveLiveFeedState = {
+      supported: true,
+      status: "ready",
+      entries: [
+        {
+          key: "payload:old-search",
+          kind: "payload",
+          preview: `LNNRANK|v=2|e=search|id=f24cf44635-300|ch=lnnrank0ff24cf4|ss=f24cf44635|n=300|t=${firstTimestampMs}|rg=us|sr=world|re=Stormrage|nm=Oldsearch`,
+          firstSeenAt: new Date(firstTimestampMs).toISOString(),
+          lastSeenAt: new Date(firstTimestampMs).toISOString(),
+        },
+        {
+          key: "payload:new-search",
+          kind: "payload",
+          preview: `LNNRANK|v=2|e=search|id=f24cf44635-301|ch=lnnrank0ff24cf4|ss=f24cf44635|n=301|t=${secondTimestampMs}|rg=us|sr=world|re=Stormrage|nm=Newsearch`,
+          firstSeenAt: new Date(secondTimestampMs).toISOString(),
+          lastSeenAt: new Date(secondTimestampMs).toISOString(),
+        },
+      ],
+    };
+
+    response = await fetch(`http://127.0.0.1:${port}/api/state`);
+    state = await response.json();
+    assert.equal(state.passiveLiveFeed.events.length, 1);
+    assert.equal(
+      state.passiveLiveFeed.events[0].preview,
+      `LNNRANK|v=2|e=search|id=f24cf44635-301|ch=lnnrank0ff24cf4|ss=f24cf44635|n=301|t=${secondTimestampMs}|rg=us|sr=world|re=Stormrage|nm=Newsearch`
+    );
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

@@ -16,12 +16,17 @@ local FILTER_EVENTS = {
 local filtersInstalled = false
 local lastPublishedAt = nil
 local lastPublishedPayload = nil
+local lastPublishError = nil
 local passiveChannelName = nil
 local passivePlayerKey = nil
 local passiveSessionId = nil
 local passiveWritePending = false
 local publishSequence = 0
 local PASSIVE_LOG_LIMIT = 40
+
+local function encodePayloadForChatTransport(payload)
+    return tostring(payload or ""):gsub("|", "^")
+end
 
 local function sanitizeSegment(value, maxLength)
     local text = tostring(value or "")
@@ -278,6 +283,7 @@ local function syncPassiveBridgeState()
     bridge.sequence = publishSequence
     bridge.lastPublishedAt = lastPublishedAt
     bridge.lastPublishedPayload = lastPublishedPayload
+    bridge.lastPublishError = lastPublishError
     bridge.messageCount = 0
     for _ in pairs(getPassiveMessageLog()) do
         bridge.messageCount = bridge.messageCount + 1
@@ -379,6 +385,7 @@ function addon.GetPassiveChannelDebugState()
         joined = getPassiveChannelNumber(channelName) ~= nil,
         lastPublishedAt = lastPublishedAt,
         lastPublishedPayload = lastPublishedPayload,
+        lastPublishError = lastPublishError,
         playerKey = buildPassivePlayerKey(),
         sequence = publishSequence,
         sessionId = ensurePassiveSessionId(),
@@ -392,7 +399,9 @@ function addon.PublishPassivePayload(payload, metadata)
 
     local channelNumber = ensurePassiveChannel()
     if not channelNumber or type(SendChatMessage) ~= "function" then
+        lastPublishError = channelNumber and "SendChatMessage unavailable." or "Passive channel not joined."
         setPassiveWritePending(true)
+        syncPassiveBridgeState()
         return false
     end
 
@@ -402,14 +411,17 @@ function addon.PublishPassivePayload(payload, metadata)
         publishSequence = publishSequence + 1
     end
 
-    local ok = pcall(SendChatMessage, payload, "CHANNEL", nil, channelNumber)
+    local chatPayload = encodePayloadForChatTransport(payload)
+    local ok, err = pcall(SendChatMessage, chatPayload, "CHANNEL", nil, channelNumber)
     if ok then
         lastPublishedAt = getNowUnix()
         lastPublishedPayload = payload
+        lastPublishError = nil
         appendPassiveMessageLogEntry(metadata, payload)
         hideChannelEverywhere(passiveChannelName)
         setPassiveWritePending(false)
     else
+        lastPublishError = string.format("channel=%s error=%s", tostring(channelNumber), tostring(err or "unknown"))
         setPassiveWritePending(true)
     end
     syncPassiveBridgeState()

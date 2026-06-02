@@ -332,24 +332,102 @@ local function appendSavedBatchEvent(event, payload)
     pruneEventBatch(bridge)
 end
 
+local function appendLiveRelayLogEntry(payload, event, options)
+    if type(addon.AppendLiveEventLogEntry) ~= "function" or type(payload) ~= "string" or payload == "" then
+        return
+    end
+
+    local metadata = {}
+    if type(event) == "table" then
+        for key, value in pairs(event) do
+            metadata[key] = value
+        end
+    end
+
+    if type(options) == "table" then
+        metadata.deliveryStatus = options.deliveryStatus
+        metadata.savedBatchEnabled = options.savedBatchEnabled == true
+        metadata.passiveChannelEnabled = options.passiveChannelEnabled == true
+        metadata.passiveDelivered = options.passiveDelivered == true
+        metadata.passiveError = options.passiveError
+    end
+
+    addon.AppendLiveEventLogEntry(payload, metadata)
+end
+
+local function appendLiveRelayDiagnostic(message, metadata)
+    if type(addon.AppendLiveEventLogEntry) ~= "function" or type(message) ~= "string" or message == "" then
+        return
+    end
+
+    local diagnosticMetadata = {}
+    if type(metadata) == "table" then
+        for key, value in pairs(metadata) do
+            diagnosticMetadata[key] = value
+        end
+    end
+
+    addon.AppendLiveEventLogEntry(message, diagnosticMetadata)
+end
+
 local function publishEvent(event)
-    if type(event) ~= "table" or not shouldPublishAnyRelay() then
+    if type(event) ~= "table" then
         return false
     end
 
     local payload = encodeEventPayload(event)
-    if #payload > MAX_PASSIVE_PAYLOAD_LENGTH then
+    if not shouldPublishAnyRelay() then
+        appendLiveRelayLogEntry(payload, event, {
+            savedBatchEnabled = false,
+            passiveChannelEnabled = false,
+            passiveDelivered = false,
+            deliveryStatus = "relay-disabled",
+        })
         return false
     end
-    appendSavedBatchEvent(event, payload)
-    if type(addon.PublishPassivePayload) == "function" and type(addon.IsPassiveChannelEnabled) == "function" and
-        addon.IsPassiveChannelEnabled() then
-        addon.PublishPassivePayload(payload, event)
+
+    if #payload > MAX_PASSIVE_PAYLOAD_LENGTH then
+        appendLiveRelayLogEntry(payload:sub(1, MAX_PASSIVE_PAYLOAD_LENGTH), event, {
+            savedBatchEnabled = addon.IsSavedEventBatchEnabled(),
+            passiveChannelEnabled = type(addon.IsPassiveChannelEnabled) == "function" and addon.IsPassiveChannelEnabled(),
+            passiveDelivered = false,
+            deliveryStatus = "payload-too-large",
+        })
+        return false
     end
+
+    local savedBatchEnabled = addon.IsSavedEventBatchEnabled()
+    local passiveChannelEnabled = type(addon.IsPassiveChannelEnabled) == "function" and addon.IsPassiveChannelEnabled()
+    local passiveDelivered = false
+
+    if savedBatchEnabled then
+        appendSavedBatchEvent(event, payload)
+    end
+
+    if type(addon.PublishPassivePayload) == "function" and passiveChannelEnabled then
+        passiveDelivered = addon.PublishPassivePayload(payload, event) == true
+    end
+
+    local passiveError = nil
+    if passiveChannelEnabled and type(addon.GetPassiveChannelDebugState) == "function" then
+        local passiveState = addon.GetPassiveChannelDebugState()
+        passiveError = passiveState and passiveState.lastPublishError or nil
+    end
+
+    appendLiveRelayLogEntry(payload, event, {
+        savedBatchEnabled = savedBatchEnabled,
+        passiveChannelEnabled = passiveChannelEnabled,
+        passiveDelivered = passiveDelivered,
+        passiveError = passiveError,
+        deliveryStatus = passiveChannelEnabled
+            and (passiveDelivered and "channel-sent" or "channel-failed")
+            or (savedBatchEnabled and "saved-only" or "not-delivered"),
+    })
+
     if type(addon.NotifyStateChanged) == "function" then
         addon.NotifyStateChanged()
     end
-    return true
+    return savedBatchEnabled or passiveDelivered
 end
 
 function addon.IsSavedEventBatchEnabled()
@@ -370,11 +448,36 @@ function addon.ResetSavedEventBatchForSession()
 end
 
 function addon.PublishSearchEvent(lookup)
-    if addon.IsSuppressedInCurrentInstance() or type(lookup) ~= "table" then
+    if addon.IsSuppressedInCurrentInstance() then
+        appendLiveRelayDiagnostic("Search relay skipped: instance-suppressed.", {
+            eventType = "search",
+            source = type(lookup) == "table" and lookup.source or "unknown",
+            region = type(lookup) == "table" and lookup.region or nil,
+            realm = type(lookup) == "table" and lookup.realm or nil,
+            characterName = type(lookup) == "table" and lookup.characterName or nil,
+            deliveryStatus = "instance-suppressed",
+        })
+        return false
+    end
+
+    if type(lookup) ~= "table" then
+        appendLiveRelayDiagnostic("Search relay skipped: invalid lookup payload.", {
+            eventType = "search",
+            source = "unknown",
+            deliveryStatus = "invalid-request",
+        })
         return false
     end
 
     if not lookup.region or not lookup.realm or not lookup.characterName then
+        appendLiveRelayDiagnostic("Search relay skipped: missing region, realm, or character name.", {
+            eventType = "search",
+            source = lookup.source or "unknown",
+            region = lookup.region,
+            realm = lookup.realm,
+            characterName = lookup.characterName,
+            deliveryStatus = "invalid-request",
+        })
         return false
     end
 
@@ -383,6 +486,12 @@ end
 
 function addon.PublishLfgStatusSnapshot(region, members)
     if addon.IsSuppressedInCurrentInstance() then
+        appendLiveRelayDiagnostic("LFG relay skipped: instance-suppressed.", {
+            eventType = "lfg_status",
+            source = "lfg-status",
+            region = region,
+            deliveryStatus = "instance-suppressed",
+        })
         return false
     end
 

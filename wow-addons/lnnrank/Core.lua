@@ -596,7 +596,17 @@ local function handleSlashCommand(message)
         end
     end
 
-    addon.Print("commands: /lnnrank status | searching on/off | combat on/off | group on/off | applicants on/off | passive on/off/status | rescan")
+    if command == "livelog" then
+        if type(addon.ToggleLiveEventLogWindow) == "function" then
+            addon.ToggleLiveEventLogWindow()
+            return
+        end
+
+        addon.Print("Live relay log is not available in this addon build yet.")
+        return
+    end
+
+    addon.Print("commands: /lnnrank status | searching on/off | combat on/off | group on/off | applicants on/off | passive on/off/status | livelog | rescan")
 end
 
 SLASH_LNNRANK1 = "/lnnrank"

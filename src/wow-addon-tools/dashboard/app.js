@@ -138,6 +138,17 @@ function formatShortDate(value) {
     : date.toLocaleDateString();
 }
 
+function formatDelayMs(value) {
+  const numeric = toNumber(value);
+  if (numeric == null) {
+    return "Unknown";
+  }
+  if (numeric < 1000) {
+    return `${Math.round(numeric)} ms`;
+  }
+  return `${(numeric / 1000).toFixed(numeric >= 10000 ? 0 : 1)} s`;
+}
+
 function toNumber(value) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -983,15 +994,10 @@ function comparePassiveLogRecency(left, right) {
 }
 
 function getPassiveLogSourceEntries(liveFeed) {
-  const events = liveFeed && Array.isArray(liveFeed.events) ? liveFeed.events : [];
-  const entries = liveFeed && Array.isArray(liveFeed.entries) ? liveFeed.entries : [];
-  if (events.length === 0) {
-    return entries;
+  if (liveFeed && Array.isArray(liveFeed.readerEvents)) {
+    return liveFeed.readerEvents;
   }
-  if (entries.length === 0) {
-    return events;
-  }
-  return [...events, ...entries];
+  return liveFeed && Array.isArray(liveFeed.events) ? liveFeed.events : [];
 }
 
 function resolvePassivePayloadSortAt(entry, parsed) {
@@ -1042,7 +1048,6 @@ function resolveVisiblePassiveSession(passive, liveFeed) {
 function buildPassiveLogEntries(passive, liveFeed) {
   const merged = new Map();
   const liveEntries = getPassiveLogSourceEntries(liveFeed);
-  const messageLog = Array.isArray(passive && passive.messageLog) ? passive.messageLog : [];
   const activeChannelName = passive && passive.channelName ? passive.channelName : null;
   const activeSessionId = resolveVisiblePassiveSession(passive, liveFeed);
 
@@ -1058,6 +1063,13 @@ function buildPassiveLogEntries(passive, liveFeed) {
     existing.source = existing.source || candidate.source;
     existing.sequence = existing.sequence || candidate.sequence;
     existing.payload = existing.payload || candidate.payload;
+    existing.receivedAt = latestTimestamp(existing.receivedAt, candidate.receivedAt);
+    existing.delayMs =
+      existing.delayMs == null
+        ? candidate.delayMs
+        : candidate.delayMs == null
+          ? existing.delayMs
+          : Math.max(existing.delayMs, candidate.delayMs);
     existing.transport =
       existing.transport === candidate.transport
         ? existing.transport
@@ -1094,38 +1106,9 @@ function buildPassiveLogEntries(passive, liveFeed) {
           : formatSourceLabel(parsed.source),
       sequence: parsed.sequence,
       payload: entry.preview,
+      receivedAt: entry.receivedAt || entry.firstSeenAt || entry.lastSeenAt || null,
+      delayMs: typeof entry.delayMs === "number" ? entry.delayMs : null,
       transport: "Live",
-    });
-  }
-
-  for (const entry of messageLog) {
-    if (!entry || !entry.payload) {
-      continue;
-    }
-
-    const parsed = parsePassivePayloadEnvelope(entry.payload);
-    if (parsed && activeChannelName && parsed.channelName && parsed.channelName !== activeChannelName) {
-      continue;
-    }
-    if (parsed && activeSessionId && parsed.sessionId && parsed.sessionId !== activeSessionId) {
-      continue;
-    }
-    upsertEntry(`payload:${entry.payload}`, {
-      id: `payload:${entry.payload}`,
-      sortAt: resolvePassivePayloadSortAt(entry, parsed),
-      title:
-        parsed && parsed.characterName && parsed.realm
-          ? `${parsed.characterName}-${parsed.realm}`
-          : parsed && parsed.eventType === "lfg_status"
-            ? "LFG heartbeat"
-            : [entry.characterName, entry.realm].filter(Boolean).join("-") || "Unknown event",
-      source:
-        parsed && parsed.eventType === "lfg_status"
-          ? "LFG heartbeat"
-          : formatSourceLabel((parsed && parsed.source) || entry.source || "wow"),
-      sequence: (parsed && parsed.sequence) || entry.sequence || 0,
-      payload: entry.payload,
-      transport: "Saved",
     });
   }
 
@@ -1219,7 +1202,7 @@ function renderPassive(data) {
       <div class="passive-log-head">
         <div>
           <h2>Relay Log</h2>
-          <p>Clean outbound payloads from the addon, merged from live memory and saved snapshots.</p>
+          <p>Raw payloads captured by the live channel reader.</p>
         </div>
         <button
           class="danger compact-toolbar-button"
@@ -1240,7 +1223,9 @@ function renderPassive(data) {
                       <div class="passive-log-row-head">
                         <strong>${escapeHtml(entry.title)}</strong>
                         <div class="passive-log-meta">
-                          <span>${escapeHtml(entry.sortAt ? formatDate(entry.sortAt) : "Unknown time")}</span>
+                          <span>sent ${escapeHtml(entry.sortAt ? formatDate(entry.sortAt) : "Unknown time")}</span>
+                          <span>recv ${escapeHtml(entry.receivedAt ? formatDate(entry.receivedAt) : "Unknown time")}</span>
+                          <span>delay ${escapeHtml(entry.delayMs != null ? formatDelayMs(entry.delayMs) : "Unknown")}</span>
                           <span>${escapeHtml(entry.source)}</span>
                           <span>seq ${escapeHtml(formatCompactNumber(entry.sequence || 0, 0))}</span>
                           <span>${escapeHtml(entry.transport)}</span>
@@ -1613,21 +1598,28 @@ async function clearLfgApplicants() {
   }
 }
 
-function clearLiveLog() {
-  if (!state.data) {
-    return;
+async function clearLiveLog() {
+  const button = document.querySelector("[data-clear-live-log]");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Clearing...";
   }
 
-  const entries = buildPassiveLogEntries(state.data.passiveBridge, state.data.passiveLiveFeed);
-  if (!entries.length) {
-    return;
+  try {
+    await fetch("/api/live-log/clear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    state.liveLogHiddenIds = [];
+    state.liveLogPage = 1;
+    await loadState();
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Clear Log";
+    }
   }
-
-  const mergedIds = new Set([...state.liveLogHiddenIds, ...entries.map((entry) => entry.id)]);
-  state.liveLogHiddenIds = [...mergedIds].slice(-400);
-  state.liveLogPage = 1;
-  persistViewState();
-  renderAll();
 }
 
 function bindTabs() {
@@ -1769,7 +1761,7 @@ function bindEvents() {
 
     const clearLiveLogButton = clickTarget.closest("[data-clear-live-log]");
     if (clearLiveLogButton) {
-      clearLiveLog();
+      void clearLiveLog();
       return;
     }
 
@@ -1809,4 +1801,4 @@ applyActiveTab();
 void loadState();
 setInterval(() => {
   void loadState();
-}, 2000);
+}, 1000);

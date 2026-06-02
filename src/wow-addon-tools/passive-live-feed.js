@@ -6,6 +6,7 @@ const path = require("node:path");
 const {
   extractCanonicalPayload,
   extractPayloadTimestampMs,
+  normalizeAddonTransportText,
   parseAddonEventPayload,
 } = require("./addon-event-format");
 
@@ -14,15 +15,16 @@ const HELPER_PROJECT_PATH = path.join(__dirname, "passive-live-scanner", "Passiv
 const HELPER_SOURCE_PATH = path.join(__dirname, "passive-live-scanner", "Program.cs");
 const HELPER_OUTPUT_DIR = path.join(REPO_ROOT, "output", "passive-live-scanner");
 const HELPER_DLL_PATH = path.join(HELPER_OUTPUT_DIR, "PassiveLiveScanner.dll");
-const DEFAULT_SCAN_INTERVAL_MS = 1500;
+const DEFAULT_SCAN_INTERVAL_MS = 500;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 60000;
 const DEFAULT_REGION_SCAN_TIMEOUT_MS = 4000;
-const DEFAULT_MAX_MATCHES = 24;
-const DEFAULT_CONTEXT_BYTES = 192;
+const DEFAULT_DISCOVERY_MAX_MATCHES = 24;
+const DEFAULT_REGION_MAX_MATCHES = 96;
+const DEFAULT_CONTEXT_BYTES = 256;
 const LIVE_ENTRY_LIMIT = 40;
 const LIVE_EVENT_LIMIT = 400;
 const LIVE_REGION_LIMIT = 12;
-const DEFAULT_DISCOVERY_REFRESH_MS = 45000;
+const DEFAULT_DISCOVERY_REFRESH_MS = 2000;
 
 let helperBuildPromise = null;
 
@@ -128,7 +130,7 @@ async function discoverPassiveChannelMemory(options) {
     "--pattern",
     String(options.channelName),
     "--maxMatches",
-    String(options.maxMatches || DEFAULT_MAX_MATCHES),
+    String(options.maxMatches || DEFAULT_DISCOVERY_MAX_MATCHES),
     "--contextBytes",
     String(options.contextBytes || DEFAULT_CONTEXT_BYTES),
   ];
@@ -150,9 +152,9 @@ async function scanPassiveMemoryRegions(options) {
     "--regions",
     options.regions.map((entry) => `${String(entry.regionBase)}:${String(entry.regionSize)}`).join(","),
     "--pattern",
-    String(options.pattern || "LNNRANK|"),
+    String(options.pattern || "LNNRANK"),
     "--maxMatches",
-    String(options.maxMatches || DEFAULT_MAX_MATCHES),
+    String(options.maxMatches || DEFAULT_REGION_MAX_MATCHES),
     "--contextBytes",
     String(options.contextBytes || DEFAULT_CONTEXT_BYTES),
   ];
@@ -208,7 +210,7 @@ function extractPassiveLiveFeedEntries(scanResult) {
 }
 
 function extractCanonicalPayloads(preview) {
-  const raw = String(preview || "");
+  const raw = normalizeAddonTransportText(preview);
   const payloads = [];
   const seen = new Set();
   let offset = 0;
@@ -259,11 +261,12 @@ function trimAtNoiseBoundary(text) {
 
 function normalizePassivePreview(preview) {
   const raw = String(preview || "").trim();
-  if (!raw || (!raw.includes("LNNRANK|") && !raw.includes("lnnrank"))) {
+  const normalizedRaw = normalizeAddonTransportText(raw);
+  if (!normalizedRaw || (!normalizedRaw.includes("LNNRANK|") && !normalizedRaw.includes("lnnrank"))) {
     return null;
   }
 
-  const payload = extractCanonicalPayload(raw);
+  const payload = extractCanonicalPayload(normalizedRaw);
   if (payload) {
     return {
       kind: "payload",
@@ -271,7 +274,11 @@ function normalizePassivePreview(preview) {
     };
   }
 
-  const plain = raw
+  if (normalizedRaw.includes("LNNRANK|")) {
+    return null;
+  }
+
+  const plain = normalizedRaw
     .replace(/\|c[0-9A-Fa-f]{8}/gu, "")
     .replace(/\|r/gu, "")
     .replace(/\|Hchannel:channel:\d+\|h(\[[^\]]*lnnrank[^\]]+\])\|h/gu, "$1")
@@ -290,7 +297,7 @@ function normalizePassivePreview(preview) {
     }
   }
 
-  const channelMatch = raw.match(/lnnrank[a-z0-9]+/iu);
+  const channelMatch = normalizedRaw.match(/lnnrank[a-z0-9]+/iu);
   if (channelMatch) {
     return {
       kind: "channel",
@@ -298,7 +305,7 @@ function normalizePassivePreview(preview) {
     };
   }
 
-  const fallback = trimAtNoiseBoundary(plain || raw);
+  const fallback = trimAtNoiseBoundary(plain || normalizedRaw);
   return fallback
     ? {
         kind: "memory-hit",
@@ -308,7 +315,21 @@ function normalizePassivePreview(preview) {
 }
 
 function parsePassiveCandidateMetadata(preview) {
-  const payload = extractCanonicalPayload(preview);
+  const payloads = extractCanonicalPayloads(preview);
+  const payload =
+    payloads.length > 0
+      ? payloads
+          .map((candidate) => {
+            const parsed = parseAddonEventPayload(candidate) || null;
+            return {
+              payload: candidate,
+              parsed,
+              timestampMs: parsed ? Number(parsed.capturedAtMs || 0) : extractPayloadTimestampMs(candidate) || 0,
+              sequence: parsed ? Number(parsed.sequence || 0) : 0,
+            };
+          })
+          .sort((left, right) => right.timestampMs - left.timestampMs || right.sequence - left.sequence)[0].payload
+      : extractCanonicalPayload(preview);
   if (!payload) {
     return {
       payload: null,
@@ -331,6 +352,33 @@ function parsePassiveCandidateMetadata(preview) {
     sequence: parsed ? Number(parsed.sequence || 0) : 0,
     timestampMs: parsed ? Number(parsed.capturedAtMs || 0) : extractPayloadTimestampMs(payload) || 0,
   };
+}
+
+function parseBestPassiveCandidateMetadata(previews) {
+  let bestMetadata = null;
+  for (const preview of previews) {
+    for (const entry of extractPassivePreviewEntries(preview)) {
+      if (entry.kind !== "payload") {
+        continue;
+      }
+      const metadata = parsePassiveCandidateMetadata(entry.preview);
+      if (
+        metadata &&
+        metadata.payload &&
+        (!bestMetadata ||
+          metadata.timestampMs > bestMetadata.timestampMs ||
+          (metadata.timestampMs === bestMetadata.timestampMs && metadata.sequence > bestMetadata.sequence))
+      ) {
+        bestMetadata = metadata;
+      }
+    }
+  }
+
+  if (bestMetadata) {
+    return bestMetadata;
+  }
+
+  return parsePassiveCandidateMetadata(previews.find(Boolean) || "");
 }
 
 function getPassiveCandidateSourceWeight(eventType, source) {
@@ -360,9 +408,9 @@ function comparePassiveCandidates(left, right) {
   return (
     right.channelMatch - left.channelMatch ||
     right.sessionMatch - left.sessionMatch ||
-    right.sourceWeight - left.sourceWeight ||
     right.timestampMs - left.timestampMs ||
     right.sequence - left.sequence ||
+    right.sourceWeight - left.sourceWeight ||
     right.versionWeight - left.versionWeight ||
     right.priority - left.priority ||
     right.numericAddress - left.numericAddress
@@ -377,7 +425,8 @@ function selectPassiveRegionCandidates(scanResult, options = {}) {
 
   for (const match of matches) {
     const preview = String(match.previewUtf8 || match.previewUtf16 || "");
-    const metadata = parsePassiveCandidateMetadata(preview);
+    const normalizedPreview = normalizeAddonTransportText(preview);
+    const metadata = parseBestPassiveCandidateMetadata([match.previewUtf8 || "", match.previewUtf16 || ""]);
     const numericAddress = Number.parseInt(String(match.address || "").replace(/^0x/iu, ""), 16);
     const numericRegionBase = Number.parseInt(String(match.regionBase || "").replace(/^0x/iu, ""), 16);
     const regionSize = Number.parseInt(String(match.regionSize || ""), 10);
@@ -390,16 +439,16 @@ function selectPassiveRegionCandidates(scanResult, options = {}) {
     }
 
     let priority = 0;
-    if (preview.includes("]:")) {
+    if (normalizedPreview.includes("]:")) {
       priority += 3;
     }
-    if (preview.includes("LNNRANK|")) {
+    if (normalizedPreview.includes("LNNRANK|")) {
       priority += 2;
     }
-    if (preview.includes("lnnrank")) {
+    if (normalizedPreview.includes("lnnrank")) {
       priority += 1;
     }
-    if (preview.includes("|v=2|")) {
+    if (normalizedPreview.includes("|v=2|")) {
       priority += 2;
     }
 
@@ -411,7 +460,7 @@ function selectPassiveRegionCandidates(scanResult, options = {}) {
       sourceWeight: getPassiveCandidateSourceWeight(metadata.eventType, metadata.source),
       timestampMs: metadata.timestampMs,
       sequence: metadata.sequence,
-      versionWeight: preview.includes("|v=2|") ? 1 : 0,
+      versionWeight: normalizedPreview.includes("|v=2|") ? 1 : 0,
       channelMatch:
         preferredChannelName &&
         normalizePassiveDiscoveryToken(metadata.channelName || "") === preferredChannelName
@@ -440,15 +489,16 @@ function selectPassiveAddressCandidates(scanResult) {
   return matches
     .map((match) => {
       const preview = String(match.previewUtf8 || match.previewUtf16 || "");
-      const metadata = parsePassiveCandidateMetadata(preview);
+      const normalizedPreview = normalizeAddonTransportText(preview);
+      const metadata = parseBestPassiveCandidateMetadata([match.previewUtf8 || "", match.previewUtf16 || ""]);
       let priority = 0;
-      if (preview.includes("]:")) {
+      if (normalizedPreview.includes("]:")) {
         priority += 3;
       }
-      if (preview.includes("LNNRANK|")) {
+      if (normalizedPreview.includes("LNNRANK|")) {
         priority += 2;
       }
-      if (preview.includes("lnnrank")) {
+      if (normalizedPreview.includes("lnnrank")) {
         priority += 1;
       }
 
@@ -459,7 +509,7 @@ function selectPassiveAddressCandidates(scanResult) {
         sourceWeight: getPassiveCandidateSourceWeight(metadata.eventType, metadata.source),
         channelMatch: 0,
         sessionMatch: 0,
-        versionWeight: preview.includes("|v=2|") ? 1 : 0,
+        versionWeight: normalizedPreview.includes("|v=2|") ? 1 : 0,
         timestampMs: metadata.timestampMs,
         sequence: metadata.sequence,
       };
@@ -477,24 +527,95 @@ function normalizePassiveDiscoveryToken(value) {
     .replace(/[^a-z0-9]/gu, "");
 }
 
+function createPassivePayloadCursor(timestampMs = 0, sequence = 0) {
+  return {
+    timestampMs: Number.isFinite(Number(timestampMs)) ? Number(timestampMs) : 0,
+    sequence: Number.isFinite(Number(sequence)) ? Number(sequence) : 0,
+  };
+}
+
+function comparePassivePayloadCursor(left, right) {
+  const leftTimestampMs = Number((left && left.timestampMs) || 0);
+  const rightTimestampMs = Number((right && right.timestampMs) || 0);
+  if (leftTimestampMs !== rightTimestampMs) {
+    return leftTimestampMs - rightTimestampMs;
+  }
+
+  const leftSequence = Number((left && left.sequence) || 0);
+  const rightSequence = Number((right && right.sequence) || 0);
+  return leftSequence - rightSequence;
+}
+
+function maxPassivePayloadCursor(left, right) {
+  return comparePassivePayloadCursor(left, right) >= 0 ? left : right;
+}
+
 function buildPassiveDiscoveryPattern(passiveBridge) {
   const channelName = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.channelName);
   const playerKey = normalizePassiveDiscoveryToken(passiveBridge && passiveBridge.playerKey);
 
   if (channelName) {
-    return `ch=${channelName}`;
+    return `|ch=${channelName}|`;
   }
 
   if (playerKey.length >= 6) {
-    return `ch=lnnrank${playerKey}`;
+    return `|ch=lnnrank${playerKey}|`;
   }
 
   return null;
 }
 
+function buildPassiveDiscoveryPools(passiveBridge, observedSessionId = null) {
+  const channelName =
+    passiveBridge && passiveBridge.enabled && passiveBridge.channelName
+      ? String(passiveBridge.channelName).trim()
+      : "";
+  const sessionId = String(observedSessionId || "").trim();
+  const pools = [];
+  const genericPattern = passiveBridge && passiveBridge.enabled ? buildPassiveDiscoveryPattern(passiveBridge) : null;
+  if (genericPattern) {
+    pools.push({
+      key: "generic",
+      pattern: genericPattern,
+      regionLimit: LIVE_REGION_LIMIT,
+      preferredChannelName: channelName || null,
+      preferredSessionId: sessionId || null,
+    });
+  }
+
+  return pools;
+}
+
+function mergeDiscoveryRegions(existingRegions, nextRegions, limit) {
+  const merged = new Map();
+  for (const region of [...(nextRegions || []), ...(existingRegions || [])]) {
+    if (!region || !region.regionBase || !region.regionSize) {
+      continue;
+    }
+    merged.set(`${region.regionBase}:${region.regionSize}`, {
+      regionBase: region.regionBase,
+      regionSize: region.regionSize,
+    });
+  }
+  return [...merged.values()].slice(0, Math.max(1, limit || LIVE_REGION_LIMIT));
+}
+
+function flattenDiscoveryRegions(discoveryPools) {
+  const merged = new Map();
+  for (const pool of Object.values(discoveryPools || {})) {
+    for (const region of pool && Array.isArray(pool.regions) ? pool.regions : []) {
+      if (!region || !region.regionBase || !region.regionSize) {
+        continue;
+      }
+      merged.set(`${region.regionBase}:${region.regionSize}`, region);
+    }
+  }
+  return [...merged.values()];
+}
+
 function createPassiveLiveFeedMonitor(options = {}) {
   const scanIntervalMs = Math.max(
-    1500,
+    250,
     Number.parseInt(String(options.scanIntervalMs || DEFAULT_SCAN_INTERVAL_MS), 10) || DEFAULT_SCAN_INTERVAL_MS
   );
   const discoveryRefreshMs = Math.max(
@@ -502,50 +623,99 @@ function createPassiveLiveFeedMonitor(options = {}) {
     Number.parseInt(String(options.discoveryRefreshMs || DEFAULT_DISCOVERY_REFRESH_MS), 10) ||
       DEFAULT_DISCOVERY_REFRESH_MS
   );
-  const discoveryRetryIntervalMs = Math.max(scanIntervalMs, 12000);
   const state = {
     supported: process.platform === "win32",
     status: "idle",
     channelName: null,
     sessionId: null,
+    activeSessionId: null,
     discoveryPattern: null,
     wowProcessId: null,
     lastScannedAt: null,
     lastDiscoveredAt: null,
     lastError: null,
     scanDurationMs: null,
-    discoveryRegions: [],
-    consecutiveMisses: 0,
+    discoveryPools: {},
     entries: [],
     events: [],
-    currentPromise: null,
+    readCursor: createPassivePayloadCursor(),
+    baselineAtMs: Date.now(),
   };
 
   function resetForChannel(channelName) {
     state.channelName = channelName || null;
     state.sessionId = null;
+    state.activeSessionId = null;
     state.discoveryPattern = null;
     state.wowProcessId = null;
     state.lastScannedAt = null;
     state.lastDiscoveredAt = null;
     state.lastError = null;
     state.scanDurationMs = null;
-    state.discoveryRegions = [];
-    state.consecutiveMisses = 0;
+    state.discoveryPools = {};
     state.entries = [];
     state.events = [];
+    state.readCursor = createPassivePayloadCursor();
+    state.baselineAtMs = Date.now();
     state.status = channelName ? "idle" : "waiting";
   }
 
   function mergeEntries(nextEntries, observedAtIso) {
+    const observedAtMs = Date.parse(observedAtIso) || Date.now();
     const merged = new Map(state.entries.map((entry) => [entry.key, entry]));
     const newEvents = [];
-    for (const entry of nextEntries) {
+    let nextReadCursor = state.readCursor;
+    const expectedChannelName = normalizePassiveDiscoveryToken(state.channelName);
+    const orderedEntries = [...nextEntries]
+      .map((entry) => {
+        const payloadMetadata =
+          entry.kind === "payload" && typeof entry.preview === "string"
+            ? parsePassiveCandidateMetadata(entry.preview)
+            : null;
+        const payloadCursor = payloadMetadata
+          ? createPassivePayloadCursor(payloadMetadata.timestampMs, payloadMetadata.sequence)
+          : null;
+        return {
+          entry,
+          payloadMetadata,
+          payloadCursor,
+        };
+      })
+      .filter(({ entry, payloadMetadata }) => {
+        if (entry.kind !== "payload") {
+          return true;
+        }
+        if (!payloadMetadata || !payloadMetadata.payload) {
+          return false;
+        }
+        return (
+          !expectedChannelName ||
+          normalizePassiveDiscoveryToken(payloadMetadata.channelName || "") === expectedChannelName
+        );
+      })
+      .sort((left, right) => {
+        if (left.payloadCursor && right.payloadCursor) {
+          return comparePassivePayloadCursor(left.payloadCursor, right.payloadCursor);
+        }
+        if (left.payloadCursor) {
+          return -1;
+        }
+        if (right.payloadCursor) {
+          return 1;
+        }
+        return String(left.entry.key || "").localeCompare(String(right.entry.key || ""), "en-US");
+      });
+
+    for (const { entry, payloadMetadata, payloadCursor } of orderedEntries) {
       const payloadTimestampMs =
         entry.kind === "payload" && typeof entry.preview === "string" ? extractPayloadTimestampMs(entry.preview) : null;
 
       const eventAtIso =
         payloadTimestampMs != null && payloadTimestampMs > 0 ? new Date(payloadTimestampMs).toISOString() : observedAtIso;
+      const isPreBaselinePayload =
+        payloadCursor &&
+        Number(payloadCursor.timestampMs || 0) > 0 &&
+        Number(payloadCursor.timestampMs || 0) < state.baselineAtMs - scanIntervalMs;
       if (entry.encoding === "window" && entry.address) {
         for (const [existingKey, existingEntry] of merged.entries()) {
           if (existingEntry.address === entry.address && existingEntry.encoding !== "window") {
@@ -571,10 +741,24 @@ function createPassiveLiveFeedMonitor(options = {}) {
         lastSeenAt: observedAtIso,
         seenCount: 1,
       });
-      newEvents.push({
-        ...entry,
-        eventAt: eventAtIso,
-      });
+      if (
+        payloadCursor &&
+        !isPreBaselinePayload &&
+        comparePassivePayloadCursor(payloadCursor, nextReadCursor) > 0
+      ) {
+        const delayMs =
+          payloadTimestampMs != null && payloadTimestampMs > 0 ? Math.max(0, observedAtMs - payloadTimestampMs) : null;
+        newEvents.push({
+          ...entry,
+          eventAt: eventAtIso,
+          receivedAt: observedAtIso,
+          receivedAtMs: observedAtMs,
+          delayMs,
+        });
+      }
+      if (payloadCursor) {
+        nextReadCursor = maxPassivePayloadCursor(nextReadCursor, payloadCursor);
+      }
     }
 
     state.entries = [...merged.values()]
@@ -585,6 +769,15 @@ function createPassiveLiveFeedMonitor(options = {}) {
         .sort((left, right) => String(left.eventAt || "").localeCompare(String(right.eventAt || ""), "en-US"))
         .slice(-LIVE_EVENT_LIMIT);
     }
+    state.readCursor = nextReadCursor;
+
+    const latestSession = [...state.entries]
+      .map((entry) => parsePassiveCandidateMetadata(entry.preview))
+      .filter((metadata) => metadata && metadata.sessionId)
+      .sort((left, right) => right.timestampMs - left.timestampMs || right.sequence - left.sequence)[0];
+    if (latestSession && latestSession.sessionId) {
+      state.activeSessionId = latestSession.sessionId;
+    }
   }
 
   function snapshot() {
@@ -592,18 +785,207 @@ function createPassiveLiveFeedMonitor(options = {}) {
       supported: state.supported,
       status: state.status,
       channelName: state.channelName,
-      sessionId: state.sessionId,
+      sessionId: state.activeSessionId || state.sessionId,
       discoveryPattern: state.discoveryPattern,
       wowProcessId: state.wowProcessId,
       lastScannedAt: state.lastScannedAt,
       lastError: state.lastError,
       scanDurationMs: state.scanDurationMs,
-      discoveryRegions: state.discoveryRegions,
+      discoveryRegions: flattenDiscoveryRegions(state.discoveryPools),
+      discoveryPools: Object.fromEntries(
+        Object.entries(state.discoveryPools).map(([key, pool]) => [
+          key,
+          {
+            pattern: pool.pattern,
+            regions: pool.regions,
+            lastScannedAt: pool.lastScannedAt,
+            lastDiscoveredAt: pool.lastDiscoveredAt,
+            lastError: pool.lastError,
+            scanDurationMs: pool.scanDurationMs,
+          },
+        ])
+      ),
       entries: state.entries,
       entryCount: state.entries.length,
       events: state.events,
       eventCount: state.events.length,
+      readCursor: {
+        timestampMs: Number(state.readCursor && state.readCursor.timestampMs || 0),
+        sequence: Number(state.readCursor && state.readCursor.sequence || 0),
+      },
     };
+  }
+
+  function clearLog(cursor = null) {
+    if (cursor && typeof cursor === "object") {
+      state.readCursor = maxPassivePayloadCursor(
+        state.readCursor,
+        createPassivePayloadCursor(cursor.timestampMs, cursor.sequence)
+      );
+    }
+    state.events = [];
+  }
+
+  function recomputeDerivedState() {
+    const discoveryPools = Object.values(state.discoveryPools || {});
+    const scannedAtValues = discoveryPools
+      .map((pool) => Date.parse(pool.lastScannedAt || ""))
+      .filter((value) => Number.isFinite(value));
+    const discoveredAtValues = discoveryPools
+      .map((pool) => Date.parse(pool.lastDiscoveredAt || ""))
+      .filter((value) => Number.isFinite(value));
+    const scanDurationValues = discoveryPools
+      .map((pool) => Number(pool.scanDurationMs || 0))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const lastError = discoveryPools.map((pool) => pool.lastError).find(Boolean) || null;
+    const hasActiveScan = discoveryPools.some((pool) => pool.currentPromise);
+    const hasEntries = state.entries.length > 0;
+
+    state.lastScannedAt =
+      scannedAtValues.length > 0 ? new Date(Math.max(...scannedAtValues)).toISOString() : state.lastScannedAt;
+    state.lastDiscoveredAt =
+      discoveredAtValues.length > 0 ? new Date(Math.max(...discoveredAtValues)).toISOString() : state.lastDiscoveredAt;
+    state.scanDurationMs = scanDurationValues.length > 0 ? Math.max(...scanDurationValues) : state.scanDurationMs;
+    state.lastError = lastError;
+
+    if (!state.channelName || !(state.discoveryPattern || "").trim()) {
+      state.status = "waiting";
+    } else if (hasActiveScan) {
+      state.status = "scanning";
+    } else if (lastError && !hasEntries) {
+      state.status = "error";
+    } else {
+      state.status = "ready";
+    }
+  }
+
+  function ensurePoolState(spec) {
+    const existing = state.discoveryPools[spec.key];
+    if (
+      existing &&
+      existing.pattern === spec.pattern &&
+      existing.regionLimit === spec.regionLimit &&
+      existing.preferredChannelName === spec.preferredChannelName &&
+      existing.preferredSessionId === spec.preferredSessionId
+    ) {
+      return existing;
+    }
+
+    const nextPool = {
+      key: spec.key,
+      pattern: spec.pattern,
+      regionLimit: spec.regionLimit,
+      preferredChannelName: spec.preferredChannelName,
+      preferredSessionId: spec.preferredSessionId,
+      regions: [],
+      lastScannedAt: null,
+      lastDiscoveredAt: null,
+      lastError: null,
+      scanDurationMs: null,
+      consecutiveMisses: 0,
+      currentPromise: null,
+      discoveryPromise: null,
+    };
+    state.discoveryPools[spec.key] = nextPool;
+    return nextPool;
+  }
+
+  function applyDiscoveryResult(pool, result, observedAtIso) {
+    const nextEntries = extractPassiveLiveFeedEntries(result);
+    mergeEntries(nextEntries, observedAtIso);
+    const selectedRegions = selectPassiveRegionCandidates(result, {
+      preferredChannelName: pool.preferredChannelName,
+      preferredSessionId: pool.preferredSessionId,
+    });
+    pool.regions = mergeDiscoveryRegions(pool.regions, selectedRegions, pool.regionLimit);
+    pool.lastDiscoveredAt = observedAtIso;
+    pool.consecutiveMisses = 0;
+  }
+
+  function startBackgroundDiscovery(pool, wowProcessId, discoveryMaxMatches) {
+    if (pool.discoveryPromise) {
+      return;
+    }
+
+    pool.discoveryPromise = (async () => {
+      const result = await discoverPassiveChannelMemory({
+        processId: wowProcessId,
+        channelName: pool.pattern,
+        maxMatches: discoveryMaxMatches,
+        contextBytes: options.contextBytes || DEFAULT_CONTEXT_BYTES,
+      });
+      const observedAtIso = new Date().toISOString();
+      applyDiscoveryResult(pool, result, observedAtIso);
+      pool.scanDurationMs = Math.max(Number(pool.scanDurationMs || 0), Number(result && result.durationMs) || 0);
+      pool.lastScannedAt = observedAtIso;
+      recomputeDerivedState();
+    })()
+      .catch((error) => {
+        pool.lastError = error.message || "Passive live feed discovery failed.";
+      })
+      .finally(() => {
+        pool.discoveryPromise = null;
+        recomputeDerivedState();
+      });
+  }
+
+  async function refreshPool(pool, wowProcessId) {
+    const scanStartedAt = Date.now();
+    pool.lastError = null;
+    const discoveryMaxMatches = Math.max(
+      1,
+      Number.parseInt(
+        String(options.discoveryMaxMatches || options.maxMatches || DEFAULT_DISCOVERY_MAX_MATCHES),
+        10
+      ) || DEFAULT_DISCOVERY_MAX_MATCHES
+    );
+    const regionMaxMatches = Math.max(
+      discoveryMaxMatches,
+      Number.parseInt(String(options.regionMaxMatches || DEFAULT_REGION_MAX_MATCHES), 10) || DEFAULT_REGION_MAX_MATCHES
+    );
+    const lastDiscoveryMs = Date.parse(pool.lastDiscoveredAt || "");
+    const shouldRediscover =
+      !Array.isArray(pool.regions) ||
+      pool.regions.length === 0 ||
+      !Number.isFinite(lastDiscoveryMs) ||
+      Date.now() - lastDiscoveryMs >= discoveryRefreshMs;
+
+    if (!Array.isArray(pool.regions) || pool.regions.length === 0) {
+      const result = await discoverPassiveChannelMemory({
+        processId: wowProcessId,
+        channelName: pool.pattern,
+        maxMatches: discoveryMaxMatches,
+        contextBytes: options.contextBytes || DEFAULT_CONTEXT_BYTES,
+      });
+      const observedAtIso = new Date().toISOString();
+      applyDiscoveryResult(pool, result, observedAtIso);
+      pool.lastScannedAt = observedAtIso;
+      pool.scanDurationMs = Number(result && result.durationMs) || Date.now() - scanStartedAt;
+      recomputeDerivedState();
+      return;
+    }
+
+    const result = await scanPassiveMemoryRegions({
+      processId: wowProcessId,
+      regions: pool.regions,
+      pattern: "LNNRANK",
+      maxMatches: regionMaxMatches,
+      contextBytes: options.contextBytes || DEFAULT_CONTEXT_BYTES,
+    });
+    const observedAtIso = new Date().toISOString();
+    const nextEntries = extractPassiveLiveFeedEntries(result);
+    mergeEntries(nextEntries, observedAtIso);
+    if (nextEntries.some((entry) => entry.kind === "payload")) {
+      pool.consecutiveMisses = 0;
+    } else {
+      pool.consecutiveMisses += 1;
+    }
+    pool.lastScannedAt = observedAtIso;
+    pool.scanDurationMs = Number(result && result.durationMs) || Date.now() - scanStartedAt;
+    if (shouldRediscover) {
+      startBackgroundDiscovery(pool, wowProcessId, discoveryMaxMatches);
+    }
+    recomputeDerivedState();
   }
 
   async function refresh(passiveBridge) {
@@ -613,8 +995,11 @@ function createPassiveLiveFeedMonitor(options = {}) {
         : "";
     const sessionId =
       passiveBridge && passiveBridge.enabled && passiveBridge.sessionId ? String(passiveBridge.sessionId).trim() : "";
-    const discoveryPattern =
-      passiveBridge && passiveBridge.enabled ? buildPassiveDiscoveryPattern(passiveBridge) : null;
+    const poolSpecs =
+      passiveBridge && passiveBridge.enabled
+        ? buildPassiveDiscoveryPools(passiveBridge, state.activeSessionId || null)
+        : [];
+    const discoveryPattern = poolSpecs.map((spec) => `${spec.key}:${spec.pattern}`).join(" || ") || null;
 
     if (!state.supported) {
       state.status = "unsupported";
@@ -626,102 +1011,81 @@ function createPassiveLiveFeedMonitor(options = {}) {
       return;
     }
 
-    if (state.channelName !== channelName || state.discoveryPattern !== discoveryPattern) {
+    if (state.channelName !== channelName) {
       resetForChannel(channelName);
       state.sessionId = sessionId || null;
       state.discoveryPattern = discoveryPattern;
-    } else if ((state.sessionId || "") !== sessionId) {
-      resetForChannel(channelName);
+    } else {
       state.sessionId = sessionId || null;
       state.discoveryPattern = discoveryPattern;
     }
 
-    if (state.currentPromise) {
-      return state.currentPromise;
+    const expectedKeys = new Set(poolSpecs.map((spec) => spec.key));
+    for (const key of Object.keys(state.discoveryPools)) {
+      if (!expectedKeys.has(key) && !state.discoveryPools[key].currentPromise) {
+        delete state.discoveryPools[key];
+      }
     }
 
-    const lastScanMs = Date.parse(state.lastScannedAt || "");
-    const lastDiscoveryMs = Date.parse(state.lastDiscoveredAt || "");
-    const activeIntervalMs =
-      Array.isArray(state.discoveryRegions) && state.discoveryRegions.length > 0
-        ? scanIntervalMs
-        : discoveryRetryIntervalMs;
-    if (Number.isFinite(lastScanMs) && Date.now() - lastScanMs < activeIntervalMs) {
+    const duePools = [];
+    for (const spec of poolSpecs) {
+      const pool = ensurePoolState(spec);
+      if (pool.currentPromise) {
+        continue;
+      }
+
+      const lastScanMs = Date.parse(pool.lastScannedAt || "");
+      const activeIntervalMs = scanIntervalMs;
+      if (Number.isFinite(lastScanMs) && Date.now() - lastScanMs < activeIntervalMs) {
+        continue;
+      }
+      duePools.push(pool);
+    }
+
+    if (duePools.length <= 0) {
+      recomputeDerivedState();
       return null;
     }
 
     state.status = "scanning";
     state.lastError = null;
-    const scanStartedAt = Date.now();
-
     const run = (async () => {
       const wowProcess = await detectWowProcess();
       if (!wowProcess) {
-        state.status = "waiting";
         state.wowProcessId = null;
-        state.lastError = "WoW process not found.";
-        state.lastScannedAt = new Date().toISOString();
-        state.scanDurationMs = Date.now() - scanStartedAt;
+        for (const pool of duePools) {
+          pool.lastError = "WoW process not found.";
+          pool.lastScannedAt = new Date().toISOString();
+          pool.scanDurationMs = 0;
+        }
+        recomputeDerivedState();
         return;
       }
 
       state.wowProcessId = wowProcess.processId;
-      const shouldRediscover =
-        !Array.isArray(state.discoveryRegions) ||
-        state.discoveryRegions.length === 0 ||
-        !Number.isFinite(lastDiscoveryMs) ||
-        Date.now() - lastDiscoveryMs >= discoveryRefreshMs;
-      const result = shouldRediscover
-        ? await discoverPassiveChannelMemory({
-            processId: wowProcess.processId,
-            channelName: discoveryPattern,
-            maxMatches: options.maxMatches || DEFAULT_MAX_MATCHES,
-          })
-        : await scanPassiveMemoryRegions({
-            processId: wowProcess.processId,
-            regions: state.discoveryRegions,
-            pattern: "LNNRANK|",
-            maxMatches: options.maxMatches || DEFAULT_MAX_MATCHES,
-          });
-      const observedAtIso = new Date().toISOString();
-      const nextEntries = extractPassiveLiveFeedEntries(result);
-      mergeEntries(nextEntries, observedAtIso);
-      if (shouldRediscover || !state.discoveryRegions.length) {
-        state.discoveryRegions = selectPassiveRegionCandidates(result, {
-          preferredChannelName: channelName,
-          preferredSessionId: sessionId,
-        });
-        state.lastDiscoveredAt = observedAtIso;
-      }
-      if (nextEntries.some((entry) => entry.kind === "payload")) {
-        state.consecutiveMisses = 0;
-      } else if (!shouldRediscover) {
-        state.consecutiveMisses += 1;
-        if (state.consecutiveMisses >= 3) {
-          state.discoveryRegions = [];
-          state.lastDiscoveredAt = null;
-          state.consecutiveMisses = 0;
-        }
-      }
-      state.lastScannedAt = observedAtIso;
-      state.scanDurationMs = Number(result && result.durationMs) || Date.now() - scanStartedAt;
-      state.status = "ready";
-    })()
-      .catch((error) => {
-        state.status = "error";
-        state.lastError = error.message || "Passive live feed scan failed.";
-        state.lastScannedAt = new Date().toISOString();
-        state.scanDurationMs = Date.now() - scanStartedAt;
-      })
-      .finally(() => {
-        state.currentPromise = null;
-      });
+      await Promise.all(
+        duePools.map((pool) => {
+          const task = refreshPool(pool, wowProcess.processId)
+            .catch((error) => {
+              pool.lastError = error.message || "Passive live feed scan failed.";
+              pool.lastScannedAt = new Date().toISOString();
+              pool.scanDurationMs = 0;
+            })
+            .finally(() => {
+              pool.currentPromise = null;
+              recomputeDerivedState();
+            });
+          pool.currentPromise = task;
+          return task;
+        })
+      );
+    })();
 
-    state.currentPromise = run;
     return run;
   }
 
   return {
+    clearLog,
     refresh,
     snapshot,
   };
@@ -729,6 +1093,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
 
 module.exports = {
   buildPassiveDiscoveryPattern,
+  buildPassiveDiscoveryPools,
   createPassiveLiveFeedMonitor,
   extractCanonicalPayload,
   extractPassiveLiveFeedEntries,

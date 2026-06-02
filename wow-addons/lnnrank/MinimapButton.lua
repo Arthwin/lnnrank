@@ -201,15 +201,9 @@ local function updateButtonVisuals()
         return
     end
 
-    if needsRefresh() then
-        button.Background:SetVertexColor(0.86, 0.18, 0.18, 0.95)
-        button.IconText:SetText("!")
-        button.IconTextShadow:SetText("!")
-    else
-        button.Background:SetVertexColor(0.18, 0.72, 0.26, 0.95)
-        button.IconText:SetText("W")
-        button.IconTextShadow:SetText("W")
-    end
+    button.Background:SetVertexColor(0.08, 0.08, 0.08, 0.95)
+    button.IconText:SetText("W")
+    button.IconTextShadow:SetText("W")
 
     updateTooltip()
 end

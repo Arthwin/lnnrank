@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Globalization;
@@ -298,16 +299,16 @@ internal static class PassiveScanner
     private const uint ProcessQueryInformation = 0x0400;
     private const uint ProcessVmRead = 0x0010;
     private const uint MemCommit = 0x1000;
+    private const uint MemPrivate = 0x20000;
     private const uint PageGuard = 0x100;
     private const uint PageNoAccess = 0x01;
+    private const long DiscoverRegionScanBytes = 2 * 1024 * 1024;
+    private const int DiscoverMaxParallelism = 4;
 
     public static IReadOnlyList<MatchResult> Discover(DiscoverOptions options)
     {
         var patternSets = CreatePatternSets(options.Pattern);
         var overlapBytes = GetOverlapBytes(options.ContextBytes, patternSets);
-        var results = new List<MatchResult>();
-        var seenKeys = new HashSet<string>(StringComparer.Ordinal);
-
         NativeMethods.GetSystemInfo(out var systemInfo);
         using var processHandle = OpenProcess(options.ProcessId);
         var memoryInfoSize = Marshal.SizeOf<NativeMethods.MemoryBasicInformation>();
@@ -332,6 +333,7 @@ internal static class PassiveScanner
 
             var isReadable =
                 memoryInfo.State == MemCommit &&
+                memoryInfo.Type == MemPrivate &&
                 (memoryInfo.Protect & PageGuard) == 0 &&
                 (memoryInfo.Protect & PageNoAccess) == 0;
 
@@ -343,23 +345,34 @@ internal static class PassiveScanner
             currentAddress = nextAddress;
         }
 
-        for (var index = 0; index < regions.Count && results.Count < options.MaxMatches; index += 1)
+        var discoveredMatches = new ConcurrentBag<MatchResult>();
+        var parallelOptions = new ParallelOptions
         {
-            var region = regions[index];
+            MaxDegreeOfParallelism = Math.Max(1, Math.Min(Environment.ProcessorCount, DiscoverMaxParallelism))
+        };
+
+        Parallel.ForEach(regions, parallelOptions, region =>
+        {
+            var localResults = new List<MatchResult>();
+            var localSeenKeys = new HashSet<string>(StringComparer.Ordinal);
             ScanRegion(
                 processHandle,
                 region.RegionBase,
-                region.RegionSize,
-                options.MaxMatches,
+                Math.Min(region.RegionSize, DiscoverRegionScanBytes),
+                int.MaxValue,
                 options.ContextBytes,
                 options.ChunkSizeBytes,
                 overlapBytes,
                 patternSets,
-                results,
-                seenKeys);
-        }
+                localResults,
+                localSeenKeys);
+            foreach (var match in localResults)
+            {
+                discoveredMatches.Add(match);
+            }
+        });
 
-        return results;
+        return SelectNewestMatches(discoveredMatches.ToArray(), options.MaxMatches);
     }
 
     public static IReadOnlyList<MatchResult> ScanRegions(ScanRegionsOptions options)
@@ -571,35 +584,93 @@ internal static class PassiveScanner
             .Trim();
     }
 
-    private static IEnumerable<int> FindPatternOffsets(byte[] bytes, byte[] needle)
+    private static IReadOnlyList<MatchResult> SelectNewestMatches(IReadOnlyList<MatchResult> matches, int maxMatches)
     {
+        if (matches.Count <= Math.Max(1, maxMatches))
+        {
+            return matches;
+        }
+
+        return matches
+            .OrderByDescending(ExtractPayloadTimestampMs)
+            .ThenByDescending(ExtractPayloadSequence)
+            .ThenByDescending(match => ParseAddress(match.Address))
+            .Take(Math.Max(1, maxMatches))
+            .ToArray();
+    }
+
+    private static long ExtractPayloadTimestampMs(MatchResult match) => Math.Max(
+        ExtractLongField(match.PreviewUtf8, "|t="),
+        ExtractLongField(match.PreviewUtf16, "|t="));
+
+    private static long ExtractPayloadSequence(MatchResult match) => Math.Max(
+        ExtractLongField(match.PreviewUtf8, "|n="),
+        ExtractLongField(match.PreviewUtf16, "|n="));
+
+    private static long ExtractLongField(string value, string key)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return 0;
+        }
+
+        var normalized = value.Replace("||", "|", StringComparison.Ordinal).Replace('^', '|');
+        var index = normalized.IndexOf(key, StringComparison.Ordinal);
+        if (index < 0)
+        {
+            return 0;
+        }
+
+        index += key.Length;
+        var end = index;
+        while (end < normalized.Length && char.IsDigit(normalized[end]))
+        {
+            end += 1;
+        }
+
+        return end > index && long.TryParse(normalized[index..end], NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : 0;
+    }
+
+    private static long ParseAddress(string value)
+    {
+        var normalized = string.IsNullOrWhiteSpace(value) ? "" : value.Trim();
+        if (normalized.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            return long.TryParse(normalized[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : 0;
+        }
+
+        return long.TryParse(normalized, NumberStyles.Integer, CultureInfo.InvariantCulture, out var decimalValue)
+            ? decimalValue
+            : 0;
+    }
+
+    private static IReadOnlyList<int> FindPatternOffsets(byte[] bytes, byte[] needle)
+    {
+        var offsets = new List<int>();
         if (needle.Length == 0 || bytes.Length < needle.Length)
         {
-            yield break;
+            return offsets;
         }
 
-        for (var index = 0; index <= bytes.Length - needle.Length; index += 1)
+        var searchOffset = 0;
+        while (searchOffset <= bytes.Length - needle.Length)
         {
-            if (bytes[index] != needle[0])
+            var relativeOffset = bytes.AsSpan(searchOffset).IndexOf(needle);
+            if (relativeOffset < 0)
             {
-                continue;
+                break;
             }
 
-            var matches = true;
-            for (var needleIndex = 1; needleIndex < needle.Length; needleIndex += 1)
-            {
-                if (bytes[index + needleIndex] != needle[needleIndex])
-                {
-                    matches = false;
-                    break;
-                }
-            }
-
-            if (matches)
-            {
-                yield return index;
-            }
+            var absoluteOffset = searchOffset + relativeOffset;
+            offsets.Add(absoluteOffset);
+            searchOffset = absoluteOffset + 1;
         }
+
+        return offsets;
     }
 
     private static byte[] CombineArrays(byte[] left, byte[] right)
