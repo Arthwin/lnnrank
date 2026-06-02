@@ -136,14 +136,45 @@ async function runAddonRequestSync(options = {}) {
   const providersUsed = new Set();
   const onUpdate = typeof options.onUpdate === "function" ? options.onUpdate : null;
 
+  function resolveCompanionPayloadSource() {
+    return provider === "web"
+      ? "warcraftlogs-web"
+      : provider === "api"
+        ? "warcraftlogs-api"
+        : provider === "off"
+          ? "cache-only"
+          : providersUsed.size === 1 && providersUsed.has("api")
+            ? "warcraftlogs-api"
+            : providersUsed.size === 1 && providersUsed.has("web")
+              ? "warcraftlogs-web"
+              : "warcraftlogs-auto";
+  }
+
+  function publishCompanionFromCache() {
+    const payload = buildCompanionPayload(listCachedRecords(cache), {
+      builtAt: formatIsoTimestamp(),
+      source: resolveCompanionPayloadSource(),
+      rateLimit,
+      statuses: listRequestStatuses(cache),
+    });
+    const staged = stageAddonBundle(outputDir, payload);
+    const installed = options.installWow ? installStagedAddons(staged, addonsDir) : null;
+    return {
+      staged,
+      installed,
+    };
+  }
+
   async function persistProgress(update) {
     saveCache(cache, cachePath);
+    const companion = publishCompanionFromCache();
     if (onUpdate) {
       await onUpdate({
         ...update,
         provider,
         queueLength: requests.length,
         statusCount: statusEntries.length,
+        companion,
       });
     }
   }
@@ -375,30 +406,7 @@ async function runAddonRequestSync(options = {}) {
   });
 
   saveCache(cache, cachePath);
-
-  const payload = buildCompanionPayload(listCachedRecords(cache), {
-    builtAt: formatIsoTimestamp(),
-    source:
-      provider === "web"
-        ? "warcraftlogs-web"
-        : provider === "api"
-          ? "warcraftlogs-api"
-          : provider === "off"
-            ? "cache-only"
-            : providersUsed.size === 1 && providersUsed.has("api")
-              ? "warcraftlogs-api"
-              : providersUsed.size === 1 && providersUsed.has("web")
-                ? "warcraftlogs-web"
-                : "warcraftlogs-auto",
-    rateLimit,
-    statuses: listRequestStatuses(cache),
-  });
-  const staged = stageAddonBundle(outputDir, payload);
-
-  let installed = null;
-  if (options.installWow) {
-    installed = installStagedAddons(staged, addonsDir);
-  }
+  const { staged, installed } = publishCompanionFromCache();
 
   return {
     savedVariablesFile: savedVariablesState.file,

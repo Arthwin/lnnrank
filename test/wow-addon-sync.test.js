@@ -34,6 +34,7 @@ const {
   buildUnifiedQueue,
   createDashboardServer,
 } = require("../src/wow-addon-tools/dashboard-server");
+const { runAddonRequestSync } = require("../src/wow-addon-tools/sync-service");
 const {
   buildPassiveDiscoveryPattern,
   buildPassiveDiscoveryPools,
@@ -562,6 +563,75 @@ test("force manual requests bypass handled cache state and stay deduped", () => 
   assert.equal(queue[0].force, true);
   assert.equal(queue[0].record.score, 3000);
   assert.equal(buildSyncRequestsFromQueue(queue)[0].force, true);
+});
+
+test("sync progress installs companion payload before reporting update", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-sync-install-progress-"));
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const key = buildCacheKey("us", "Stormrage", "Progressone");
+  const companionDataPath = path.join(addonsDir, "lnnrank_companion", "data.lua");
+  let sawInstalledPayloadDuringUpdate = false;
+
+  fs.mkdirSync(tempDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify(
+      {
+        records: {
+          [key]: {
+            region: "us",
+            realm: "Stormrage",
+            name: "Progressone",
+            score: 1234,
+            className: "Mage",
+            specName: "Fire",
+            role: "dps",
+            dungeons: [],
+            updatedAt: "2026-05-31T02:55:00.000Z",
+          },
+        },
+        manualRequests: {
+          [key]: {
+            key,
+            region: "us",
+            realm: "Stormrage",
+            characterName: "Progressone",
+            source: "manual",
+            updatedAt: "2026-05-31T03:01:00.000Z",
+          },
+        },
+        requestStatuses: {},
+        providerState: {},
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  await runAddonRequestSync({
+    dbPath,
+    outputDir,
+    addonsDir,
+    provider: "off",
+    installWow: true,
+    onUpdate: async (update) => {
+      if (update.phase !== "status") {
+        return;
+      }
+
+      sawInstalledPayloadDuringUpdate = fs.existsSync(companionDataPath);
+      assert.equal(sawInstalledPayloadDuringUpdate, true);
+      const installedPayload = fs.readFileSync(companionDataPath, "utf8");
+      assert.match(installedPayload, /Progressone/u);
+      assert.match(installedPayload, /stale_cached/u);
+      assert.equal(update.companion.installed.companionInstallDir, path.dirname(companionDataPath));
+    },
+  });
+
+  assert.equal(sawInstalledPayloadDuringUpdate, true);
 });
 
 test("sync request builder reuses the exact queue snapshot shown in the app", () => {
