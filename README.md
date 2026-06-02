@@ -156,6 +156,20 @@ What it does not do:
 - Highest dungeon key data comes from a separate WCL by-level view, not the parse page.
 - Tanks use `playerscore`, DPS use `dps`, healers use `hps`.
 
+## Search performance notes
+
+The dashboard search queue is intentionally the single path for manual searches,
+addon requests, live relay events, LFG applicants, and self-refreshes. The queue
+dedupes normalized `(region, realm, name)` lookups before live work starts, then
+the sync service checks cache freshness before using Warcraft Logs.
+
+When tuning lookup speed:
+
+- add timestamps first so queue wait, lookup duration, and total request time are visible
+- keep the queue dedupe guarantee for both normal and force-refresh lookups
+- prefer configurable worker counts over hard-coded parallelism
+- keep `/reload` import behavior separate from addon-to-app live request export
+
 ## Container note
 
 The repo includes a `Dockerfile` that starts the local dashboard server. In a containerized environment you typically provide:
