@@ -12,13 +12,14 @@ const { normalizeText, slugifyRealm } = require("../mplus-matrix/normalization")
 const {
   detectSpecInfoFromText,
   getPreferredMetricForRole,
+  getSpecInfo,
   normalizeRoleValue,
   resolveRoleForCharacterContext,
 } = require("../shared/wow-specs");
 const { buildDerivedPresentation, decorateDungeonArray } = require("../shared/wow-performance");
 const { buildCharacterRecord } = require("./lnnrank-bridge");
 
-const DEFAULT_LOOKUP_PROVIDER = "web";
+const DEFAULT_LOOKUP_PROVIDER = "auto";
 const SUPPORTED_LOOKUP_PROVIDERS = new Set(["auto", "web", "api", "off"]);
 const DEFAULT_WEB_DATA_TIMEOUT_MS = Math.max(
   10000,
@@ -87,6 +88,15 @@ function resolveLookupProvider(value) {
 
 function hasApiCredentials() {
   return Boolean(process.env.WCL_CLIENT_ID && process.env.WCL_CLIENT_SECRET);
+}
+
+async function warmWclApiAccessToken() {
+  if (!hasApiCredentials()) {
+    return false;
+  }
+  const client = new WclClient();
+  await client.getAccessToken();
+  return true;
 }
 
 function toNumber(value) {
@@ -662,8 +672,9 @@ async function runWebCharacterPipeline(readSnapshot, lookup, options = {}) {
   }
 }
 
-async function fetchSingleCharacterViaApiMetric(lookup, metric) {
-  const client = new WclClient();
+async function fetchSingleCharacterViaApiMetric(lookup, metric, options = {}) {
+  const client = options.client || new WclClient();
+  const collectedAt = options.collectedAt || formatIsoTimestamp();
   const response = await client.graphQlRequest(CHARACTER_QUERY, {
     name: lookup.name,
     serverSlug: slugifyRealm(lookup.realm),
@@ -681,7 +692,8 @@ async function fetchSingleCharacterViaApiMetric(lookup, metric) {
     };
   }
 
-  const zoneStats = extractZoneStats(character.zoneRankings, formatIsoTimestamp());
+  const zoneStats = extractZoneStats(character.zoneRankings, collectedAt);
+  const specInfo = getSpecInfo(zoneStats.specName);
   return {
     found: true,
     record: buildCharacterRecord({
@@ -691,6 +703,7 @@ async function fetchSingleCharacterViaApiMetric(lookup, metric) {
       score: zoneStats.score,
       parseMetric: metric,
       specName: zoneStats.specName,
+      className: zoneStats.className || (specInfo ? specInfo.className : null),
       role: zoneStats.role,
       updatedAt: zoneStats.updatedAt,
       wclCharacterId: character.canonicalID || character.id || null,
@@ -701,7 +714,12 @@ async function fetchSingleCharacterViaApiMetric(lookup, metric) {
 }
 
 async function runApiCharacterPipeline(lookup) {
-  const baseResult = await fetchSingleCharacterViaApiMetric(lookup, "playerscore");
+  const client = new WclClient();
+  const collectedAt = formatIsoTimestamp();
+  const baseResult = await fetchSingleCharacterViaApiMetric(lookup, "playerscore", {
+    client,
+    collectedAt,
+  });
   if (!baseResult.found || !baseResult.record) {
     return baseResult;
   }
@@ -730,7 +748,10 @@ async function runApiCharacterPipeline(lookup) {
     return baseResult;
   }
 
-  const metricResult = await fetchSingleCharacterViaApiMetric(lookup, preferredMetric);
+  const metricResult = await fetchSingleCharacterViaApiMetric(lookup, preferredMetric, {
+    client,
+    collectedAt,
+  });
   if (!metricResult.found || !metricResult.record) {
     return {
       ...baseResult,
@@ -990,4 +1011,5 @@ module.exports = {
   runWebCharacterPipeline,
   normalizeLookupInput,
   resolveLookupProvider,
+  warmWclApiAccessToken,
 };

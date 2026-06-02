@@ -33,6 +33,7 @@ const {
   acquireReusableWebLookupSession,
   createWebLookupSession,
   fetchCharacterViaProvider,
+  fetchSingleCharacterViaApi,
   recordNeedsWebEnrichment,
   resolveLookupProvider,
 } = require("./live-provider");
@@ -54,10 +55,6 @@ function getExpectedParseMetricForRole(roleValue) {
 }
 
 function resolveSyncWorkerCount(provider, options = {}) {
-  if (provider === "api") {
-    return 1;
-  }
-
   const rawValue = options.workers == null ? DEFAULT_SYNC_WORKERS : options.workers;
   return Math.max(1, Number.parseInt(String(rawValue), 10) || 1);
 }
@@ -155,7 +152,7 @@ async function runAddonRequestSync(options = {}) {
       ? path.resolve(String(options.dbPath))
       : DEFAULT_CACHE_PATH;
   const cache = loadCache(cachePath);
-  const provider = resolveLookupProvider(options.provider || DEFAULT_LOOKUP_PROVIDER);
+  const provider = resolveLookupProvider(options.provider);
   const browserPath = options.browserPath ? path.resolve(String(options.browserPath)) : null;
   const outputDir = options.outputDir
     ? path.resolve(String(options.outputDir))
@@ -384,15 +381,24 @@ async function runAddonRequestSync(options = {}) {
         if (providerCooldown.isCoolingDown) {
           throw new ProviderCooldownError("api", providerCooldown);
         }
-        providerCooldown = markProviderAttempt(cache, "api", {
-          cooldownMs: API_ATTEMPT_COOLDOWN_MS,
-        });
-        saveCache(cache, cachePath);
-        providersUsed.add("api");
-        return {
-          ...(await fetchSingleCharacterViaApi(lookup)),
-          providerUsed: "api",
-        };
+        try {
+          const result = await fetchSingleCharacterViaApi(lookup);
+          providerCooldown = markProviderAttempt(cache, "api", {
+            cooldownMs: 0,
+          });
+          saveCache(cache, cachePath);
+          providersUsed.add("api");
+          return {
+            ...result,
+            providerUsed: "api",
+          };
+        } catch (error) {
+          providerCooldown = markProviderAttempt(cache, "api", {
+            cooldownMs: API_ATTEMPT_COOLDOWN_MS,
+          });
+          saveCache(cache, cachePath);
+          throw error;
+        }
       }
 
       return {

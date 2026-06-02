@@ -6,6 +6,12 @@ const { formatIsoTimestamp, sleep } = require("./utils");
 
 const TOKEN_URL = "https://www.warcraftlogs.com/oauth/token";
 const CLIENT_GRAPHQL_URL = "https://www.warcraftlogs.com/api/v2/client";
+const sharedTokenState = {
+  clientKey: null,
+  accessToken: null,
+  tokenExpiresAt: 0,
+  tokenPromise: null,
+};
 
 class WclRateLimitError extends Error {
   constructor(message, details = {}) {
@@ -37,25 +43,59 @@ class WclClient {
       return this.accessToken;
     }
 
-    const basic = Buffer.from(`${this.clientId}:${this.clientSecret}`, "utf8").toString("base64");
-    const response = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${basic}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        grant_type: "client_credentials",
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to obtain WCL access token (${response.status}).`);
+    const clientKey = `${this.clientId}:${this.clientSecret}`;
+    if (
+      sharedTokenState.clientKey === clientKey &&
+      sharedTokenState.accessToken &&
+      Date.now() < sharedTokenState.tokenExpiresAt - 60_000
+    ) {
+      this.accessToken = sharedTokenState.accessToken;
+      this.tokenExpiresAt = sharedTokenState.tokenExpiresAt;
+      return this.accessToken;
     }
 
-    const payload = await response.json();
-    this.accessToken = payload.access_token;
-    this.tokenExpiresAt = Date.now() + ((payload.expires_in || 3600) * 1000);
+    if (sharedTokenState.clientKey === clientKey && sharedTokenState.tokenPromise) {
+      const payload = await sharedTokenState.tokenPromise;
+      this.accessToken = payload.accessToken;
+      this.tokenExpiresAt = payload.tokenExpiresAt;
+      return this.accessToken;
+    }
+
+    const basic = Buffer.from(`${this.clientId}:${this.clientSecret}`, "utf8").toString("base64");
+    sharedTokenState.clientKey = clientKey;
+    sharedTokenState.tokenPromise = (async () => {
+      const response = await fetch(TOKEN_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${basic}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          grant_type: "client_credentials",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to obtain WCL access token (${response.status}).`);
+      }
+
+      const payload = await response.json();
+      return {
+        accessToken: payload.access_token,
+        tokenExpiresAt: Date.now() + ((payload.expires_in || 3600) * 1000),
+      };
+    })();
+
+    try {
+      const payload = await sharedTokenState.tokenPromise;
+      sharedTokenState.accessToken = payload.accessToken;
+      sharedTokenState.tokenExpiresAt = payload.tokenExpiresAt;
+      this.accessToken = payload.accessToken;
+      this.tokenExpiresAt = payload.tokenExpiresAt;
+    } finally {
+      sharedTokenState.tokenPromise = null;
+    }
+
     return this.accessToken;
   }
 

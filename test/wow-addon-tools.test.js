@@ -26,6 +26,7 @@ const {
   formatTimedKeyDisplay,
   getDungeonScoreColorHex,
 } = require("../src/shared/wow-performance");
+const { extractZoneStats } = require("../src/mplus-matrix/zone-rankings");
 
 test("addon bridge normalization matches the Lua-side lookup rules", () => {
   assert.equal(normalizeRealmKeyForAddon("Shattered Hand"), "shatteredhand");
@@ -37,6 +38,43 @@ test("dungeon labels prefer known shorthand and fallback to initials", () => {
   assert.equal(createDungeonLabel("Algeth'ar Academy"), "AA");
   assert.equal(createDungeonLabel("Seat of the Triumvirate"), "SEAT");
   assert.equal(createDungeonLabel("Operation: Floodgate"), "FLOOD");
+});
+
+test("zone rankings parser extracts WCL API all-star score and highest key data", () => {
+  const stats = extractZoneStats(
+    {
+      allStars: [
+        { spec: "Arms", points: 2965.31, rankPercent: 85.05 },
+        { spec: "Fury", points: 2923.63, rankPercent: 83.37 },
+      ],
+      rankings: [
+        {
+          encounter: {
+            name: "Algeth'ar Academy",
+          },
+          rankPercent: 67.41,
+          allStars: {
+            points: 78.32,
+          },
+          bestSpec: "Fury",
+          bestRank: {
+            ilvl: 12,
+            score: 374.11,
+          },
+        },
+      ],
+    },
+    "2026-06-02T00:00:00.000Z"
+  );
+
+  assert.equal(stats.score, 2965.31);
+  assert.equal(stats.specName, "Fury");
+  assert.equal(stats.className, "Warrior");
+  assert.equal(stats.role, "dps");
+  assert.equal(stats.dungeons.algetharacademy.bestPercent, 67.41);
+  assert.equal(stats.dungeons.algetharacademy.points, 78.32);
+  assert.equal(stats.dungeons.algetharacademy.highestLevel, 12);
+  assert.equal(stats.dungeons.algetharacademy.highestLevelPoints, 374.11);
 });
 
 test("companion payload groups records by normalized region, realm, and character keys", () => {

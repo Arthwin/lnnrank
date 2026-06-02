@@ -108,11 +108,20 @@ async function main() {
             if (providerCooldown.isCoolingDown) {
               throw new ProviderCooldownError("api", providerCooldown);
             }
-            providerCooldown = markProviderAttempt(cache, "api", {
-              cooldownMs: API_ATTEMPT_COOLDOWN_MS,
-            });
-            saveCache(cache, cachePath);
-            return fetchSingleCharacterViaApi(lookup);
+            try {
+              const result = await fetchSingleCharacterViaApi(lookup);
+              providerCooldown = markProviderAttempt(cache, "api", {
+                cooldownMs: 0,
+              });
+              saveCache(cache, cachePath);
+              return result;
+            } catch (error) {
+              providerCooldown = markProviderAttempt(cache, "api", {
+                cooldownMs: API_ATTEMPT_COOLDOWN_MS,
+              });
+              saveCache(cache, cachePath);
+              throw error;
+            }
           },
         }
       );

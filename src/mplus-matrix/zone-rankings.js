@@ -1,7 +1,7 @@
 "use strict";
 
 const { normalizeText, slugifyRealm } = require("./normalization");
-const { getRoleForSpec, normalizeSpecName } = require("../shared/wow-specs");
+const { getRoleForSpec, getSpecInfo, normalizeSpecName } = require("../shared/wow-specs");
 
 const DUNGEON_KEYS = [
   "Ara-Kara, City of Echoes",
@@ -68,6 +68,15 @@ function extractTimestamp(object) {
 function extractOverallScore(zoneRankingsJson) {
   if (!zoneRankingsJson || typeof zoneRankingsJson !== "object") {
     return null;
+  }
+
+  if (Array.isArray(zoneRankingsJson.allStars)) {
+    const allStarPoints = zoneRankingsJson.allStars
+      .map((entry) => extractNestedNumber(entry, ["points", "score", "total", "amount"]))
+      .filter((entry) => entry != null);
+    if (allStarPoints.length > 0) {
+      return Math.max(...allStarPoints);
+    }
   }
 
   const direct = extractNestedNumber(zoneRankingsJson, [
@@ -156,9 +165,18 @@ function collectDungeonEntries(zoneRankingsJson) {
 
       const directPoints = extractNestedNumber(item, ["amount", "total", "score", "points"]);
       const nestedPoints = extractNestedNumber(item.score, ["amount", "total", "score", "points"]);
-      const points = directPoints != null ? directPoints : nestedPoints;
+      const allStarPoints = extractNestedNumber(item.allStars, ["amount", "total", "score", "points"]);
+      const bestRankScore = extractNestedNumber(item.bestRank, ["score", "points"]);
+      const points = directPoints != null ? directPoints : nestedPoints != null ? nestedPoints : allStarPoints;
+      const highestLevel = extractNestedNumber(item.bestRank, [
+        "ilvl",
+        "level",
+        "keystoneLevel",
+        "keyLevel",
+      ]);
       const specName = normalizeSpecName(item.bestSpec || item.spec || "");
-      const role = getRoleForSpec(specName);
+      const specInfo = getSpecInfo(specName);
+      const role = (specInfo && specInfo.role) || getRoleForSpec(specName);
 
       entries.push({
         name,
@@ -166,7 +184,10 @@ function collectDungeonEntries(zoneRankingsJson) {
         points,
         bestPercent,
         specName,
+        className: specInfo ? specInfo.className : null,
         role,
+        highestLevel,
+        highestLevelPoints: bestRankScore,
       });
     }
   }
@@ -199,7 +220,10 @@ function extractZoneStats(zoneRankingsJson, collectedAt) {
       name: entry.name,
       bestPercent: entry.bestPercent,
       points: entry.points,
+      highestLevel: entry.highestLevel,
+      highestLevelPoints: entry.highestLevelPoints,
       specName: entry.specName,
+      className: entry.className,
       role: entry.role,
     };
   }
@@ -213,6 +237,7 @@ function extractZoneStats(zoneRankingsJson, collectedAt) {
     dungeons,
     updatedAt,
     specName: primarySpec && primarySpec.specName || null,
+    className: primarySpec && primarySpec.className || null,
     role: primarySpec && primarySpec.role || null,
     rawDungeonCount: entries.length,
   };

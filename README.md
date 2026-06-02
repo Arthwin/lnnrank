@@ -133,7 +133,7 @@ What it does not do:
 
 - `WCL_CLIENT_ID`: Warcraft Logs API client ID
 - `WCL_CLIENT_SECRET`: Warcraft Logs API client secret
-- `WCL_LOOKUP_PROVIDER`: `web`, `api`, `auto`, or `off`
+- `WCL_LOOKUP_PROVIDER`: `auto`, `web`, `api`, or `off`; default `auto`
 - `WCL_WEB_BROWSER`: optional browser executable override for web scraping mode
 - `WCL_WEB_DATA_TIMEOUT_MS`: browser wait timeout for page data
 - `WCL_WEB_BROWSER_IDLE_MS`: shared browser reuse window
@@ -179,10 +179,11 @@ Current timing visibility:
 - the Search view worker strip shows worker count plus current/last lookup duration
 - queue rows and cached result rows show compact timing labels when a matching status exists
 
-Dashboard auto-sync defaults to `2` workers for web/auto lookup runs. API-only sync
-runs are still serialized by the sync service to avoid fighting API cooldown and
-rate-limit behavior. Use `WCL_DASHBOARD_SYNC_WORKERS=1` if you want to compare
-against single-worker behavior.
+Dashboard auto-sync defaults to `auto` provider mode and `2` workers. With WCL
+API credentials available, the dashboard prewarms the API token in the background
+so individual searches avoid the OAuth startup cost and usually stay under one
+second. Use `WCL_DASHBOARD_SYNC_WORKERS=1` if you want to compare against
+single-worker behavior or reduce concurrent Warcraft Logs requests.
 
 Manual stress runs:
 
@@ -198,7 +199,9 @@ or installed addon payload. Each run writes:
 - `stress-report.csv`: per-character timing rows for quick inspection
 
 Use `--force false` for a cache-path baseline, or `--run-dir <path>` to choose a
-specific output folder. Direct Node invocation also supports named flags:
+specific output folder. API/auto stress runs prewarm the WCL token by default to
+match dashboard behavior; use `--prewarm-api false` to measure cold startup.
+Direct Node invocation also supports named flags:
 
 ```powershell
 node src/wow-addon-tools/stress-search.js --count 30 --workers 2 --provider web

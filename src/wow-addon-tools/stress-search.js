@@ -12,7 +12,7 @@ const {
   listCachedRecords,
   loadCache,
 } = require("./cache");
-const { DEFAULT_LOOKUP_PROVIDER } = require("./live-provider");
+const { DEFAULT_LOOKUP_PROVIDER, hasApiCredentials, warmWclApiAccessToken } = require("./live-provider");
 const { runAddonRequestSync } = require("./sync-service");
 
 const DEFAULT_COUNT = 30;
@@ -37,6 +37,7 @@ function printUsage() {
       "  --lookups-file <path>     JSON or text lookup list",
       "  --browser-path <path>     Browser executable override for web mode",
       "  --force <true|false>      Force fresh lookups instead of cache hits (default: true)",
+      "  --prewarm-api <true|false> Warm WCL API token before timing api/auto runs (default: true)",
       "",
       "Reports:",
       "  stress-report.json",
@@ -318,6 +319,7 @@ async function main() {
   const rawWorkers = getOptionValue(options, positionals, "workers", 1, null);
   const workers = rawWorkers == null ? null : parsePositiveInt(rawWorkers, 1);
   const force = parseBoolean(getOptionValue(options, positionals, "force", 3, true), true);
+  const prewarmApi = parseBoolean(getOptionValue(options, positionals, "prewarm-api", 8, true), true);
   const sourceDbPath = path.resolve(String(getOptionValue(options, positionals, "db-path", 4, DEFAULT_CACHE_PATH)));
   const runDir = path.resolve(String(getOptionValue(options, positionals, "run-dir", 5, path.join(DEFAULT_STRESS_ROOT, safeRunId()))));
   const stressDbPath = path.join(runDir, "lnnrank-db.json");
@@ -338,6 +340,22 @@ async function main() {
   fs.mkdirSync(path.dirname(stressDbPath), { recursive: true });
   fs.copyFileSync(sourceDbPath, stressDbPath);
 
+  let apiPrewarm = null;
+
+  if (
+    prewarmApi &&
+    (String(provider).toLocaleLowerCase("en-US") === "api" ||
+      String(provider).toLocaleLowerCase("en-US") === "auto") &&
+    hasApiCredentials()
+  ) {
+    const prewarmStartedAtMs = Date.now();
+    const warmed = await warmWclApiAccessToken();
+    apiPrewarm = {
+      warmed,
+      durationMs: Date.now() - prewarmStartedAtMs,
+    };
+  }
+
   const requestedAt = new Date().toISOString();
   const requests = lookups.slice(0, count).map((lookup, index) => ({
     ...lookup,
@@ -353,7 +371,7 @@ async function main() {
   const runStartedAtMs = Date.now();
 
   process.stdout.write(
-    `Running ${requests.length} search stress lookups with provider=${provider}, workers=${workers || "default"}, force=${force}.\n`
+    `Running ${requests.length} search stress lookups with provider=${provider}, workers=${workers || "default"}, force=${force}, prewarmApi=${Boolean(apiPrewarm)}.\n`
   );
 
   const result = await runAddonRequestSync({
@@ -388,6 +406,7 @@ async function main() {
     workers: result.workers,
     requestedWorkers: workers,
     force,
+    apiPrewarm,
     requestedCount: requests.length,
     summary,
     lookups: requests.map((request) => ({
@@ -410,6 +429,7 @@ async function main() {
     [
       "",
       "Search stress summary:",
+      apiPrewarm ? `  api prewarm: ${formatMs(apiPrewarm.durationMs)}` : "  api prewarm: -",
       `  completed: ${summary.completed}/${requests.length}`,
       `  states: ${JSON.stringify(summary.stateCounts)}`,
       `  run: ${formatMs(summary.totalRunDurationMs)}`,

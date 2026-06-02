@@ -34,6 +34,7 @@ const {
 } = require("./lnnrank-bridge");
 const { formatIsoTimestamp } = require("../mplus-matrix/utils");
 const { runAddonRequestSync } = require("./sync-service");
+const { DEFAULT_LOOKUP_PROVIDER, hasApiCredentials, warmWclApiAccessToken } = require("./live-provider");
 const { createPassiveLiveFeedMonitor } = require("./passive-live-feed");
 const {
   clearLnnrankSavedVariablesApplicants,
@@ -860,6 +861,7 @@ async function createDashboardServer(options = {}) {
     : DEFAULT_OUTPUT_DIR;
   const addonsDir = options.addonsDir ? path.resolve(String(options.addonsDir)) : null;
   const provider = options.provider || null;
+  const effectiveProvider = String(provider || process.env.WCL_LOOKUP_PROVIDER || DEFAULT_LOOKUP_PROVIDER).toLowerCase();
   const syncRequests = options.runAddonRequestSync || runAddonRequestSync;
   const syncWorkerCount = resolveDashboardSyncWorkerCount(options.syncWorkers ?? options.workers);
   const backgroundTickMs =
@@ -917,6 +919,10 @@ async function createDashboardServer(options = {}) {
     latestLiveEventAtMs: 0,
     ignoreBeforeMs: 0,
   };
+
+  if ((effectiveProvider === "auto" || effectiveProvider === "api") && hasApiCredentials()) {
+    void warmWclApiAccessToken().catch(() => {});
+  }
 
   function resolveLatestPassiveLogCursorFromFeedState(passiveLiveFeedState) {
     let cursor = createPassiveLogCursor();
