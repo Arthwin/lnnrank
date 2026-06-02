@@ -512,6 +512,9 @@ test("force manual requests bypass handled cache state and stay deduped", () => 
         realm: "Stormrage",
         name: "Forceone",
         score: 3000,
+        className: "Mage",
+        specName: "Fire",
+        role: "dps",
         dungeons: [],
         updatedAt: "2026-05-31T02:55:00.000Z",
       },
@@ -2725,18 +2728,22 @@ test("dashboard applies grouped LFG heartbeat batches from passive live events",
       ["Clickedone-Stormrage:11", "Queuedtwo-Thrall:12"]
     );
     assert.deepEqual(
-      snapshot.queue.map((entry) => `${entry.characterName}-${entry.realm}`),
-      ["Queuedtwo-Thrall"]
+      snapshot.queue.map((entry) => `${entry.characterName}-${entry.realm}`).sort(),
+      ["Clickedone-Stormrage", "Queuedtwo-Thrall"]
     );
+    const queuedClickedone = snapshot.queue.find((entry) => entry.characterName === "Clickedone");
+    assert.equal(queuedClickedone.force, true);
+    assert.equal(queuedClickedone.class, "DEMONHUNTER");
     const queuedtwo = snapshot.queue.find((entry) => entry.characterName === "Queuedtwo");
     assert.equal(queuedtwo.sources.includes("applicant"), true);
     assert.equal(queuedtwo.requestOrigins.includes("passive-live"), true);
+    assert.equal(queuedtwo.force, false);
     const clickedone = snapshot.applicants.find((entry) => entry.characterName === "Clickedone");
     assert.equal(clickedone.class, "DEMONHUNTER");
     assert.equal(clickedone.assignedRole, "DAMAGER");
     assert.equal(clickedone.itemLevel, 286.4);
     assert.equal(clickedone.level, 90);
-    assert.equal(snapshot.records.find((record) => record.key === clickedoneKey).className, "DEMONHUNTER");
+    assert.equal(snapshot.records.find((record) => record.key === clickedoneKey).className, null);
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

@@ -57,8 +57,9 @@ function pushStatus(cache, statusEntries, request, state, message) {
     message,
     source: request.statusSource || request.requestSource || "savedvariables",
     updatedAt: formatIsoTimestamp(),
+    force: request.force === true || request.forceRefresh === true,
     retryCount:
-      state === "error"
+      state === "error" || request.force === true || request.forceRefresh === true
         ? Math.max(0, Number.isFinite(Number(request.retryCount)) ? Number(request.retryCount) : 0)
         : null,
   };

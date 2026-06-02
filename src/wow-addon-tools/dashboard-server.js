@@ -117,26 +117,15 @@ function buildClassHintLookup(entries) {
   return lookup;
 }
 
-function applyRecordClassHint(record, classHintLookup) {
-  if (!record || record.className) {
-    return record || null;
-  }
-
-  const key = buildCacheKey(record.region, record.realm, record.name);
-  const hint = classHintLookup && classHintLookup.get(key);
-  return hint && hint.className ? { ...record, className: hint.className } : record;
-}
-
 function enrichCharacters(entries, cache, classHintLookup = null) {
   return (entries || []).map((entry) => {
     const characterName = getCharacterEntryName(entry);
     const key = entry.key || buildCacheKey(entry.region, entry.realm, characterName);
-    const cachedRecord = getCachedRecord(cache, {
+    const record = getCachedRecord(cache, {
       region: entry.region,
       realm: entry.realm,
       name: characterName,
     });
-    const record = applyRecordClassHint(cachedRecord, classHintLookup);
     const hint = classHintLookup && classHintLookup.get(key);
     return {
       ...entry,
@@ -180,6 +169,20 @@ function isResolvedQueueStatus(status, requestUpdatedAtMs) {
 
   const statusUpdatedAtMs = Date.parse(status.updatedAt || "");
   return Number.isFinite(statusUpdatedAtMs) && Number.isFinite(requestUpdatedAtMs) && statusUpdatedAtMs >= requestUpdatedAtMs;
+}
+
+function isCachedRecordMetadataIncomplete(record) {
+  return Boolean(record && (!record.className || !record.specName || !record.role));
+}
+
+function hasCompletedForceRefreshForRequest(status, requestUpdatedAtMs, record = null) {
+  if (!status || status.force !== true || !isResolvedQueueStatus(status, requestUpdatedAtMs)) {
+    return false;
+  }
+  if (isCachedRecordMetadataIncomplete(record) && getStatusRetryCount(status) < MAX_QUEUE_ERROR_RETRIES) {
+    return false;
+  }
+  return true;
 }
 
 function createPassiveLogCursor(timestampMs = 0, sequence = 0) {
@@ -662,7 +665,13 @@ function buildUnifiedQueue(cache, savedQueue, passiveLiveQueue) {
     existing.unitToken = existing.unitToken || entry.unitToken || null;
     existing.itemLevel = existing.itemLevel || entry.itemLevel || null;
     existing.level = existing.level || entry.level || null;
-    existing.force = existing.force || entry.force === true || entry.forceRefresh === true;
+    const isApplicantLookup =
+      source === "applicant" || entry.source === "applicant" || entry.applicantID != null || entry.groupID != null;
+    existing.force =
+      existing.force ||
+      entry.force === true ||
+      entry.forceRefresh === true ||
+      (isApplicantLookup && isCachedRecordMetadataIncomplete(existing.record));
     if (!existing.sources.includes(source)) {
       existing.sources.push(source);
     }
@@ -739,13 +748,10 @@ function buildDashboardState(options = {}) {
     },
     settings: savedVariables.parsed.settings,
     providerState: cache.providerState || {},
-    records: listCachedRecords(cache).map((record) => {
-      const hintedRecord = applyRecordClassHint(record, classHintLookup);
-      return {
-        ...hintedRecord,
-        key: buildCacheKey(hintedRecord.region, hintedRecord.realm, hintedRecord.name),
-      };
-    }),
+    records: listCachedRecords(cache).map((record) => ({
+      ...record,
+      key: buildCacheKey(record.region, record.realm, record.name),
+    })),
     requestStatuses: listRequestStatuses(cache),
     queue,
     groupMembers: enrichCharacters(savedVariables.parsed.groupMembers, cache, classHintLookup),
@@ -804,6 +810,9 @@ function buildSyncRequestsFromQueue(queueEntries) {
     if (entry.itemLevel != null) request.itemLevel = entry.itemLevel;
     if (entry.level != null) request.level = entry.level;
     if (entry.force === true || entry.forceRefresh === true) request.force = true;
+    if (request.force && entry.status && entry.status.force === true) {
+      request.retryCount = getStatusRetryCount(entry.status) + 1;
+    }
     if (entry.status && entry.status.state === "error" && isRetryableQueueErrorStatus(entry.status)) {
       request.retryCount = getStatusRetryCount(entry.status) + 1;
     }
@@ -1571,20 +1580,27 @@ async function createDashboardServer(options = {}) {
         realm: entry.realm,
         name: entry.characterName,
       });
-      if (record) {
-        continue;
-      }
 
       const status = requestStatuses.get(entry.key) || null;
       const requestUpdatedAtMs = Date.parse(entry.updatedAt || entry.requestTimestamp || "");
+      const isApplicantEntry = entry.source === "applicant" || entry.applicantID != null || entry.groupID != null;
+      const needsForcedMetadataRefresh = isApplicantEntry && isCachedRecordMetadataIncomplete(record);
+      if (record && !needsForcedMetadataRefresh) {
+        continue;
+      }
+      if (record && needsForcedMetadataRefresh && hasCompletedForceRefreshForRequest(status, requestUpdatedAtMs, record)) {
+        continue;
+      }
+
       const isResolved = isResolvedQueueStatus(status, requestUpdatedAtMs);
-      if (isResolved) {
+      if (!needsForcedMetadataRefresh && isResolved) {
         continue;
       }
 
       queueEntries.push({
         ...entry,
-        record: null,
+        force: entry.force === true || needsForcedMetadataRefresh,
+        record: record || null,
         status: status || null,
       });
     }
@@ -2393,6 +2409,7 @@ async function createDashboardServer(options = {}) {
           message: entry.force ? "Force refresh queued from the dashboard." : "Queued from the dashboard.",
           source: entry.source || "manual",
           updatedAt,
+          force: entry.force === true,
           retryCount: null,
         });
         saveCache(cache, dbPath);
