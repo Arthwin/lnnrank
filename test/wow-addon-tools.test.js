@@ -28,6 +28,7 @@ const {
   getDungeonScoreColorHex,
 } = require("../src/shared/wow-performance");
 const { extractZoneStats } = require("../src/mplus-matrix/zone-rankings");
+const { createPassiveLiveFeedMonitor } = require("../src/wow-addon-tools/passive-live-feed");
 
 test("addon bridge normalization matches the Lua-side lookup rules", () => {
   assert.equal(normalizeRealmKeyForAddon("Shattered Hand"), "shatteredhand");
@@ -201,6 +202,20 @@ test("staging writes the main addon and generated companion data", () => {
     fs.readFileSync(path.join(staged.stagedCompanionDir, "data.lua"), "utf8"),
     /lnnrankCompanionData/
   );
+});
+
+test("passive live feed monitor exposes pause and resume controls", () => {
+  const monitor = createPassiveLiveFeedMonitor();
+
+  let snapshot = monitor.pause();
+  assert.equal(snapshot.paused, true);
+  assert.equal(snapshot.status, "paused");
+  assert.equal(typeof snapshot.pausedAt, "string");
+
+  snapshot = monitor.resume();
+  assert.equal(snapshot.paused, false);
+  assert.equal(snapshot.status, "waiting");
+  assert.equal(typeof snapshot.resumedAt, "string");
 });
 
 test("rendered companion data file exports a global table assignment", () => {

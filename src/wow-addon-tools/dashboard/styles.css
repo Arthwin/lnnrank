@@ -1001,6 +1001,83 @@ code {
   margin-top: 1rem;
 }
 
+.reader-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.reader-head h2 {
+  margin: 0 0 0.25rem;
+}
+
+.reader-head p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.reader-stat-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.reader-error,
+.reader-pool-error {
+  margin-top: 0.85rem;
+  padding: 0.7rem 0.85rem;
+  border-radius: 16px;
+  background: rgba(182, 59, 59, 0.1);
+  color: var(--danger);
+  border: 1px solid rgba(182, 59, 59, 0.18);
+}
+
+.reader-error {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.reader-pool-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.reader-pool-row {
+  padding: 0.85rem 0.95rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid var(--line);
+}
+
+.reader-pool-row-head,
+.reader-pool-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.8rem;
+}
+
+.reader-pool-row-head {
+  justify-content: space-between;
+}
+
+.reader-pool-row-head span,
+.reader-pool-meta {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.reader-pool-meta {
+  margin-top: 0.45rem;
+}
+
+.reader-pool-meta code {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  color: var(--ink);
+  word-break: break-all;
+}
+
 .passive-layout {
   align-items: stretch;
 }
@@ -1153,6 +1230,15 @@ body.has-modal {
 
   .manual-search-meta {
     grid-template-columns: 1fr;
+  }
+
+  .reader-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .reader-head {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .queue-card-head-top {

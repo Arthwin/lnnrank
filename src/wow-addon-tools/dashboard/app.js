@@ -1,4 +1,4 @@
-const TAB_IDS = new Set(["search", "lfg", "live"]);
+const TAB_IDS = new Set(["search", "lfg", "live", "reader"]);
 const VIEW_STATE_STORAGE_KEY = "lnnrank-dashboard-view";
 const RESULTS_PAGE_SIZE = 20;
 const LIVE_LOG_PAGE_SIZE = 12;
@@ -982,6 +982,8 @@ function renderQueue(data) {
 function formatPassiveLiveStatus(liveFeed) {
   return !liveFeed || liveFeed.status === "idle"
     ? "Idle"
+    : liveFeed.status === "paused"
+      ? "Paused"
     : liveFeed.status === "ready"
       ? "Watching"
       : liveFeed.status === "scanning"
@@ -1039,6 +1041,126 @@ function createPassiveStatChip(label, value, options = {}) {
       <span class="passive-stat-label">${escapeHtml(label)}</span>
       <strong class="passive-stat-value">${escapeHtml(displayValue)}</strong>
     </article>
+  `;
+}
+
+function formatReaderAge(value) {
+  const timestampMs = Date.parse(value || "");
+  if (!Number.isFinite(timestampMs)) {
+    return "Never";
+  }
+  return `${formatDelayMs(Date.now() - timestampMs)} ago`;
+}
+
+function formatReaderRegions(regions) {
+  const count = Array.isArray(regions) ? regions.length : 0;
+  return `${formatCompactNumber(count, 0)} region${count === 1 ? "" : "s"}`;
+}
+
+function renderReaderDashboard(data) {
+  const target = document.getElementById("readerView");
+  if (!target) {
+    return;
+  }
+
+  const liveFeed = data && data.passiveLiveFeed ? data.passiveLiveFeed : null;
+  const passive = data && data.passiveBridge ? data.passiveBridge : null;
+  if (!liveFeed) {
+    target.innerHTML = `
+      <section class="card">
+        <div class="card-head">
+          <h2>Memory Reader</h2>
+        </div>
+        ${createEmpty("The memory reader is not available in this dashboard run.")}
+      </section>
+    `;
+    return;
+  }
+
+  const isPaused = liveFeed.paused === true || liveFeed.status === "paused";
+  const statusLabel = formatPassiveLiveStatus(liveFeed);
+  const canToggle = liveFeed.supported !== false;
+  const readerButtonLabel = isPaused ? "Resume Reader" : "Pause Reader";
+  const readerButtonAction = isPaused ? "resume" : "pause";
+  const discoveryPools = liveFeed.discoveryPools && typeof liveFeed.discoveryPools === "object"
+    ? Object.entries(liveFeed.discoveryPools)
+    : [];
+  const readCursor = liveFeed.readCursor || {};
+  const statsMarkup = [
+    createPassiveStatChip("Status", statusLabel),
+    createPassiveStatChip("Channel", liveFeed.channelName || (passive && passive.channelName) || "Unknown", { code: true }),
+    createPassiveStatChip("WoW PID", liveFeed.wowProcessId != null ? String(liveFeed.wowProcessId) : "Unknown", { code: true }),
+    createPassiveStatChip("Scan Interval", liveFeed.scanIntervalMs != null ? formatDelayMs(liveFeed.scanIntervalMs) : "Unknown"),
+    createPassiveStatChip("Last Scan", formatReaderAge(liveFeed.lastScannedAt)),
+    createPassiveStatChip("Last Discovery", formatReaderAge(liveFeed.lastDiscoveredAt)),
+    createPassiveStatChip("Scan Duration", liveFeed.scanDurationMs != null ? formatDelayMs(liveFeed.scanDurationMs) : "Unknown"),
+    createPassiveStatChip("Entries", formatCompactNumber(liveFeed.entryCount ?? 0, 0)),
+    createPassiveStatChip("Events", formatCompactNumber(liveFeed.eventCount ?? 0, 0)),
+    createPassiveStatChip("Cursor", `${formatCompactNumber(readCursor.sequence || 0, 0)} @ ${readCursor.timestampMs ? formatShortDate(new Date(readCursor.timestampMs).toISOString()) : "none"}`),
+  ].join("");
+
+  target.innerHTML = `
+    <section class="card reader-overview-card">
+      <div class="reader-head">
+        <div>
+          <h2>Memory Reader</h2>
+          <p>Live RAM scanner status and controls. Pausing stops future memory scans until resumed.</p>
+        </div>
+        <button
+          id="readerToggleButton"
+          class="${isPaused ? "" : "danger"} compact-toolbar-button"
+          type="button"
+          data-reader-action="${escapeHtml(readerButtonAction)}"
+          ${canToggle ? "" : "disabled"}
+        >
+          ${escapeHtml(readerButtonLabel)}
+        </button>
+      </div>
+      <div class="passive-stat-grid reader-stat-grid">
+        ${statsMarkup}
+      </div>
+      ${
+        liveFeed.lastError
+          ? `<div class="reader-error"><strong>Last error</strong><span>${escapeHtml(liveFeed.lastError)}</span></div>`
+          : ""
+      }
+    </section>
+
+    <section class="card reader-detail-card">
+      <div class="card-head">
+        <h2>Discovery Pools</h2>
+      </div>
+      ${
+        discoveryPools.length
+          ? `<div class="reader-pool-list">
+              ${discoveryPools
+                .map(([key, pool]) => {
+                  const regions = Array.isArray(pool && pool.regions) ? pool.regions : [];
+                  return `
+                    <article class="reader-pool-row">
+                      <div class="reader-pool-row-head">
+                        <strong>${escapeHtml(key)}</strong>
+                        <span>${escapeHtml(formatReaderRegions(regions))}</span>
+                      </div>
+                      <div class="reader-pool-meta">
+                        <span>pattern <code>${escapeHtml(pool && pool.pattern ? pool.pattern : "unknown")}</code></span>
+                        <span>scan ${escapeHtml(formatReaderAge(pool && pool.lastScannedAt))}</span>
+                        <span>discover ${escapeHtml(formatReaderAge(pool && pool.lastDiscoveredAt))}</span>
+                        <span>duration ${escapeHtml(pool && pool.scanDurationMs != null ? formatDelayMs(pool.scanDurationMs) : "Unknown")}</span>
+                      </div>
+                      ${
+                        pool && pool.lastError
+                          ? `<div class="reader-pool-error">${escapeHtml(pool.lastError)}</div>`
+                          : ""
+                      }
+                    </article>
+                  `;
+                })
+                .join("")}
+            </div>`
+          : createEmpty(isPaused ? "Reader is paused; existing pool details will stay frozen." : "No discovery pool has been initialized yet.")
+      }
+    </section>
   `;
 }
 
@@ -1512,6 +1634,7 @@ function renderAll() {
   renderResults(state.data);
   renderQueue(state.data);
   renderPassive(state.data);
+  renderReaderDashboard(state.data);
   renderRosterList("applicantList", state.data.applicants, "No live LFG applicants right now.", state.data);
   applyActiveTab();
 }
@@ -1714,6 +1837,30 @@ async function clearLiveLog() {
   }
 }
 
+async function toggleReader(action, button = null) {
+  const endpoint = action === "resume" ? "/api/passive-live/resume" : "/api/passive-live/pause";
+  if (button) {
+    button.disabled = true;
+    button.textContent = action === "resume" ? "Resuming..." : "Pausing...";
+  }
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!response.ok) {
+      throw new Error(`Reader ${action} failed.`);
+    }
+    await loadState();
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 function bindTabs() {
   document.getElementById("tabs").addEventListener("click", (event) => {
     const tab = event.target.closest("[data-tab]");
@@ -1854,6 +2001,12 @@ function bindEvents() {
     const clearLiveLogButton = clickTarget.closest("[data-clear-live-log]");
     if (clearLiveLogButton) {
       void clearLiveLog();
+      return;
+    }
+
+    const readerToggleButton = clickTarget.closest("[data-reader-action]");
+    if (readerToggleButton) {
+      void toggleReader(readerToggleButton.dataset.readerAction, readerToggleButton);
       return;
     }
 

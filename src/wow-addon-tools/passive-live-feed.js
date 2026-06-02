@@ -686,6 +686,9 @@ function createPassiveLiveFeedMonitor(options = {}) {
     events: [],
     readCursor: createPassivePayloadCursor(),
     baselineAtMs: Date.now(),
+    paused: false,
+    pausedAt: null,
+    resumedAt: null,
   };
 
   function resetForChannel(channelName) {
@@ -837,6 +840,11 @@ function createPassiveLiveFeedMonitor(options = {}) {
       lastScannedAt: state.lastScannedAt,
       lastError: state.lastError,
       scanDurationMs: state.scanDurationMs,
+      paused: state.paused === true,
+      pausedAt: state.pausedAt,
+      resumedAt: state.resumedAt,
+      scanIntervalMs,
+      discoveryRefreshMs,
       discoveryRegions: flattenDiscoveryRegions(state.discoveryPools),
       discoveryPools: Object.fromEntries(
         Object.entries(state.discoveryPools).map(([key, pool]) => [
@@ -860,6 +868,24 @@ function createPassiveLiveFeedMonitor(options = {}) {
         sequence: Number(state.readCursor && state.readCursor.sequence || 0),
       },
     };
+  }
+
+  function pause() {
+    if (!state.paused) {
+      state.paused = true;
+      state.pausedAt = new Date().toISOString();
+    }
+    state.status = "paused";
+    return snapshot();
+  }
+
+  function resume() {
+    if (state.paused) {
+      state.paused = false;
+      state.resumedAt = new Date().toISOString();
+      state.status = state.channelName ? "idle" : "waiting";
+    }
+    return snapshot();
   }
 
   function clearLog(cursor = null) {
@@ -896,6 +922,8 @@ function createPassiveLiveFeedMonitor(options = {}) {
 
     if (!state.channelName || !(state.discoveryPattern || "").trim()) {
       state.status = "waiting";
+    } else if (state.paused) {
+      state.status = "paused";
     } else if (hasActiveScan) {
       state.status = "scanning";
     } else if (lastError && !hasEntries) {
@@ -1107,6 +1135,11 @@ function createPassiveLiveFeedMonitor(options = {}) {
       state.discoveryPattern = discoveryPattern;
     }
 
+    if (state.paused) {
+      state.status = "paused";
+      return null;
+    }
+
     const expectedKeys = new Set(poolSpecs.map((spec) => spec.key));
     for (const key of Object.keys(state.discoveryPools)) {
       if (!expectedKeys.has(key) && !state.discoveryPools[key].currentPromise) {
@@ -1174,7 +1207,9 @@ function createPassiveLiveFeedMonitor(options = {}) {
 
   return {
     clearLog,
+    pause,
     refresh,
+    resume,
     snapshot,
   };
 }

@@ -2652,6 +2652,40 @@ async function createDashboardServer(options = {}) {
         return;
       }
 
+      if (request.method === "POST" && requestUrl.pathname === "/api/passive-live/pause") {
+        await readRequestBody(request);
+        if (!passiveLiveFeedMonitor || typeof passiveLiveFeedMonitor.pause !== "function") {
+          jsonResponse(response, 404, { error: "Passive live reader is not available." });
+          return;
+        }
+
+        passiveLiveFeedMonitor.pause();
+        jsonResponse(response, 200, {
+          ok: true,
+          state: snapshotState(),
+        });
+        return;
+      }
+
+      if (request.method === "POST" && requestUrl.pathname === "/api/passive-live/resume") {
+        await readRequestBody(request);
+        if (!passiveLiveFeedMonitor || typeof passiveLiveFeedMonitor.resume !== "function") {
+          jsonResponse(response, 404, { error: "Passive live reader is not available." });
+          return;
+        }
+
+        passiveLiveFeedMonitor.resume();
+        const state = snapshotState();
+        if (!passiveLiveFeedStateOverride && state.passiveBridge) {
+          void passiveLiveFeedMonitor.refresh(state.passiveBridge);
+        }
+        jsonResponse(response, 200, {
+          ok: true,
+          state,
+        });
+        return;
+      }
+
       if (request.method === "POST" && requestUrl.pathname === "/api/sync") {
         await readRequestBody(request);
         const result = await runAutoSync(true);
