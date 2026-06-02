@@ -1849,6 +1849,106 @@ test("dashboard server prefers timestamped passive events over stale memory entr
   }
 });
 
+test("dashboard server ignores memory-reader payloads captured before the latest reload", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-reader-reload-cutoff-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const reloadTimestampMs = Date.parse("2026-06-01T12:00:00.000Z");
+  const staleTimestampMs = reloadTimestampMs - 1000;
+  const freshTimestampMs = reloadTimestampMs + 1000;
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf48824",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.utimesSync(savedVariablesFile, new Date(reloadTimestampMs), new Date(reloadTimestampMs));
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
+    passiveLiveFeedStateOverride: {
+      supported: true,
+      status: "ready",
+      readCursor: {
+        timestampMs: 0,
+        sequence: 0,
+      },
+      events: [
+        {
+          key: "reader-stale-from-reload-memory",
+          kind: "payload",
+          preview: `LNNRANK|v=2|e=lfg_status|id=stale-reload|ch=lnnrank0ff24cf4|ss=f24cf48824|n=800|t=${staleTimestampMs}|rg=us|sr=lfg-status|hb=${staleTimestampMs}|ix=1|tt=1|m=Reloadedold~Stormrage~g1~1`,
+          eventAt: new Date(staleTimestampMs).toISOString(),
+          firstSeenAt: new Date(reloadTimestampMs + 50).toISOString(),
+        },
+        {
+          key: "reader-fresh-live-memory",
+          kind: "payload",
+          preview: `LNNRANK|v=2|e=lfg_status|id=fresh-live|ch=lnnrank0ff24cf4|ss=f24cf48824|n=801|t=${freshTimestampMs}|rg=us|sr=lfg-status|hb=${freshTimestampMs}|ix=1|tt=1|m=Freshlive~Thrall~g2~1`,
+          eventAt: new Date(freshTimestampMs).toISOString(),
+          firstSeenAt: new Date(freshTimestampMs + 50).toISOString(),
+        },
+      ],
+    },
+    testHooks,
+  });
+
+  try {
+    const state = testHooks.snapshotState();
+    assert.deepEqual(
+      state.applicants.map((entry) => `${entry.characterName}-${entry.realm}`),
+      ["Freshlive-Thrall"]
+    );
+    assert.equal(state.passiveLiveFeed.events.length, 1);
+    assert.match(state.passiveLiveFeed.events[0].preview, /Freshlive/);
+    assert.doesNotMatch(state.passiveLiveFeed.events[0].preview, /Reloadedold/);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
 test("dashboard server exposes the active live passive session from brokered events", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-active-passive-session-"));
   const accountRoot = path.join(tempDir, "Account");
@@ -3116,8 +3216,8 @@ test("dashboard auto sync recovers after an earlier queue-empty skip", async () 
     assert.equal(statePayload.passiveBridge.playerKey, "0f24cf41");
     assert.equal(statePayload.passiveBridge.updatedAtIso, "2025-05-31T00:13:21.000Z");
     assert.equal(statePayload.passiveBridge.messageCount, 2);
-    assert.equal(statePayload.passiveBridge.messageLog.length, 2);
-    assert.equal(statePayload.passiveBridge.messageLog[0].sequence, 4);
+    assert.equal(statePayload.passiveBridge.messageLog, undefined);
+    assert.equal(statePayload.passiveBridge.lastPublishedPayload, undefined);
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

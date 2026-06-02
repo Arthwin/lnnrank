@@ -1061,10 +1061,13 @@ function comparePassiveLogRecency(left, right) {
 }
 
 function getPassiveLogSourceEntries(liveFeed) {
-  if (liveFeed && Array.isArray(liveFeed.readerEvents)) {
+  if (liveFeed && Array.isArray(liveFeed.events)) {
+    return liveFeed.events;
+  }
+  if (liveFeed && Array.isArray(liveFeed.readerEvents) && liveFeed.readerEvents.length > 0) {
     return liveFeed.readerEvents;
   }
-  return liveFeed && Array.isArray(liveFeed.events) ? liveFeed.events : [];
+  return [];
 }
 
 function resolvePassivePayloadSortAt(entry, parsed) {

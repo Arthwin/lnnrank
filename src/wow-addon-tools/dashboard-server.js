@@ -256,12 +256,16 @@ function normalizePassiveBridge(passiveBridge) {
           return Number(right.publishedAt || 0) - Number(left.publishedAt || 0);
         })
     : [];
+  const {
+    lastPublishedPayload: _lastPublishedPayload,
+    messageLog: _messageLog,
+    ...bridgeMetadata
+  } = passiveBridge;
 
   return {
-    ...passiveBridge,
+    ...bridgeMetadata,
     messageCount:
       typeof passiveBridge.messageCount === "number" ? passiveBridge.messageCount : messageLog.length,
-    messageLog,
     lastPublishedAtIso: toIsoFromUnix(passiveBridge.lastPublishedAt),
     updatedAtIso: toIsoFromUnix(passiveBridge.updatedAt),
   };
@@ -1433,6 +1437,34 @@ async function createDashboardServer(options = {}) {
     }
   }
 
+  function prunePassiveBrokerRuntimeBefore(minCapturedAtMs) {
+    const cutoffMs = Number(minCapturedAtMs || 0);
+    if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) {
+      return;
+    }
+
+    passiveBrokerRuntime.events = passiveBrokerRuntime.events.filter((entry) => {
+      const eventAtMs = Date.parse((entry && entry.eventAt) || "");
+      return !Number.isFinite(eventAtMs) || eventAtMs >= cutoffMs;
+    });
+
+    for (const [eventId, capturedAtMs] of passiveBrokerRuntime.seenEventIds.entries()) {
+      const numericCapturedAtMs = Number(capturedAtMs || 0);
+      if (numericCapturedAtMs > 0 && numericCapturedAtMs < cutoffMs) {
+        passiveBrokerRuntime.seenEventIds.delete(eventId);
+      }
+    }
+
+    for (const [key, entry] of passiveQueueRuntime.entries.entries()) {
+      const entryMs =
+        Date.parse((entry && entry.updatedAt) || "") ||
+        (Number(entry && entry.lastSeenAt ? entry.lastSeenAt : 0) * 1000);
+      if (Number.isFinite(entryMs) && entryMs > 0 && entryMs < cutoffMs) {
+        passiveQueueRuntime.entries.delete(key);
+      }
+    }
+  }
+
   function buildBrokerLogEvent(event, receivedAtMs = Date.now()) {
     const eventAt =
       Number(event && event.capturedAtMs) > 0
@@ -1869,6 +1901,10 @@ async function createDashboardServer(options = {}) {
 
   function rebuildLiveLfgRuntimeFromCurrentEvents(events, passiveSessionId = null) {
     if (!Array.isArray(events) || events.length <= 0) {
+      if (passiveSessionId != null) {
+        resetLfgRuntimeState();
+        lfgRuntime.passiveSessionKey = passiveSessionId;
+      }
       return;
     }
 
@@ -2065,7 +2101,7 @@ async function createDashboardServer(options = {}) {
     return [...collapsed.values()].sort(compareAddonEvents);
   }
 
-  function parsePassiveLiveBrokerEvents(passiveBridge, passiveLiveFeedState) {
+  function parsePassiveLiveBrokerEvents(passiveBridge, passiveLiveFeedState, options = {}) {
     if (!passiveBridge || passiveBridge.enabled !== true || !passiveLiveFeedState) {
       return {
         activeSessionId: passiveBridge && passiveBridge.sessionId ? passiveBridge.sessionId : null,
@@ -2073,7 +2109,7 @@ async function createDashboardServer(options = {}) {
       };
     }
 
-    const parsePassivePayloadList = (items) =>
+    const parsePassivePayloadList = (items, parseOptions = {}) =>
       (items || [])
       .filter((entry) => entry && entry.kind === "payload" && typeof entry.preview === "string")
       .map((entry) =>
@@ -2083,7 +2119,14 @@ async function createDashboardServer(options = {}) {
           publisher: "passive-live",
         })
       )
-      .filter(Boolean);
+      .filter((event) => {
+        if (!event) {
+          return false;
+        }
+        const minCapturedAtMs = Number(parseOptions.minCapturedAtMs || 0);
+        const capturedAtMs = Number(event.capturedAtMs || 0);
+        return !(minCapturedAtMs > 0 && capturedAtMs > 0 && capturedAtMs < minCapturedAtMs);
+      });
 
     const readerEventsAuthoritative = Boolean(
       passiveLiveFeedState &&
@@ -2091,13 +2134,17 @@ async function createDashboardServer(options = {}) {
         typeof passiveLiveFeedState.readCursor === "object"
     );
 
-    const parsedEntryEvents = readerEventsAuthoritative
-      ? []
-      : parsePassivePayloadList(
-          passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : []
-        );
+    const minReaderCapturedAtMs =
+      readerEventsAuthoritative && Number.isFinite(Number(options.minReaderCapturedAtMs))
+        ? Number(options.minReaderCapturedAtMs)
+        : 0;
+    const parsedEntryEvents = parsePassivePayloadList(
+      passiveLiveFeedState && Array.isArray(passiveLiveFeedState.entries) ? passiveLiveFeedState.entries : [],
+      { minCapturedAtMs: minReaderCapturedAtMs }
+    );
     const parsedHistoryEvents = parsePassivePayloadList(
-      passiveLiveFeedState && Array.isArray(passiveLiveFeedState.events) ? passiveLiveFeedState.events : []
+      passiveLiveFeedState && Array.isArray(passiveLiveFeedState.events) ? passiveLiveFeedState.events : [],
+      { minCapturedAtMs: minReaderCapturedAtMs }
     );
 
     const channelName = passiveBridge.channelName || null;
@@ -2209,7 +2256,17 @@ async function createDashboardServer(options = {}) {
     const savedBatchEvents = parseSavedBatchEvents(savedVariablesSnapshot);
     const legacySavedRequestEvents = parseLegacySavedRequestEvents(savedVariablesSnapshot);
     const manualEvents = parseManualPublisherEvents(cache);
-    const passiveLiveScope = parsePassiveLiveBrokerEvents(passiveBridge, passiveLiveFeedState);
+    const minReaderCapturedAtMs =
+      passiveLiveFeedState &&
+      passiveLiveFeedState.readCursor &&
+      typeof passiveLiveFeedState.readCursor === "object" &&
+      Number.isFinite(Number(savedVariablesSnapshot && savedVariablesSnapshot.lastModifiedMs))
+        ? Number(savedVariablesSnapshot.lastModifiedMs)
+        : 0;
+    prunePassiveBrokerRuntimeBefore(minReaderCapturedAtMs);
+    const passiveLiveScope = parsePassiveLiveBrokerEvents(passiveBridge, passiveLiveFeedState, {
+      minReaderCapturedAtMs,
+    });
     const deliveredEvents = publishBrokerEvents([
       ...savedBatchEvents,
       ...legacySavedRequestEvents,
