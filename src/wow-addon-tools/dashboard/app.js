@@ -17,19 +17,19 @@ const SOURCE_LABELS = {
   party: "Party snapshot",
 };
 const WOW_CLASS_COLORS = {
-  DEATHKNIGHT: "#C41E3A",
+  DEATHKNIGHT: "#C41F3B",
   DEMONHUNTER: "#A330C9",
-  DRUID: "#FF7C0A",
+  DRUID: "#FF7D0A",
   EVOKER: "#33937F",
-  HUNTER: "#AAD372",
-  MAGE: "#3FC7EB",
+  HUNTER: "#ABD473",
+  MAGE: "#40C7EB",
   MONK: "#00FF98",
-  PALADIN: "#F48CBA",
+  PALADIN: "#F58CBA",
   PRIEST: "#FFFFFF",
-  ROGUE: "#FFF468",
-  SHAMAN: "#0070DD",
-  WARLOCK: "#8788EE",
-  WARRIOR: "#C69B6D",
+  ROGUE: "#FFF569",
+  SHAMAN: "#0070DE",
+  WARLOCK: "#8787ED",
+  WARRIOR: "#C79C6E",
 };
 
 const SPEC_ROLE_MAP = {
@@ -1375,10 +1375,8 @@ function renderLfgMemberRow(entry, data) {
   const averageParseText =
     averageParse == null ? "" : `${formatCompactNumber(Math.round(averageParse), 0)}%`;
   const averageParseClass = toneClassForParsePercent(averageParse);
-  const nameToneClass = toneClassForBlendedPerformance(record, averageParse);
   const classColor = resolveLfgClassColor(entry, record);
   const nameStyle = classColor ? ` style="color: ${escapeHtml(classColor)}"` : "";
-  const nameClassAttr = classColor ? "" : ` class="${escapeHtml(nameToneClass)}"`;
   const regionInfo = entry.region ? String(entry.region).toUpperCase() : "";
   const summaryParts = [];
 
@@ -1408,7 +1406,7 @@ function renderLfgMemberRow(entry, data) {
               specName: record && record.specName,
               assignedRole: entry.assignedRole,
               role: record && record.role,
-            }))}" target="_blank" rel="noreferrer noopener"><strong${nameClassAttr}${nameStyle}>${escapeHtml(entry.characterName)}</strong></a>
+            }))}" target="_blank" rel="noreferrer noopener"><strong${nameStyle}>${escapeHtml(entry.characterName)}</strong></a>
             <span class="lfg-member-server">- ${escapeHtml(entry.realm)}</span>
             ${regionInfo ? `<span class="lfg-member-region">${escapeHtml(regionInfo)}</span>` : ""}
           </div>

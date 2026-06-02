@@ -2553,9 +2553,29 @@ test("dashboard applies grouped LFG heartbeat batches from passive live events",
   fs.mkdirSync(savedVariablesDir, { recursive: true });
   fs.mkdirSync(outputDir, { recursive: true });
   fs.mkdirSync(addonsDir, { recursive: true });
+  const clickedoneKey = buildCacheKey("us", "Stormrage", "Clickedone");
   fs.writeFileSync(
     dbPath,
-    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    JSON.stringify(
+      {
+        records: {
+          [clickedoneKey]: {
+            region: "us",
+            realm: "Stormrage",
+            name: "Clickedone",
+            score: 1234,
+            className: null,
+            dungeons: [],
+            updatedAt: new Date(eventTimestampMs).toISOString(),
+          },
+        },
+        requestStatuses: {},
+        manualRequests: {},
+        providerState: {},
+      },
+      null,
+      2
+    ),
     "utf8"
   );
   fs.writeFileSync(
@@ -2581,6 +2601,12 @@ test("dashboard applies grouped LFG heartbeat batches from passive live events",
     supported: true,
     status: "ready",
     events: [
+      {
+        key: "event-applicant-search-1",
+        kind: "payload",
+        preview: `LNNRANK|v=2|e=search|id=search-1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=811|t=${eventTimestampMs - 1}|rg=us|sr=applicant|re=Stormrage|nm=Clickedone|gi=11|mi=1|ar=DAMAGER|cl=DEMONHUNTER|il=286.4|lv=90`,
+        eventAt: new Date(eventTimestampMs - 1).toISOString(),
+      },
       {
         key: "event-lfg-heartbeat-1",
         kind: "payload",
@@ -2608,6 +2634,12 @@ test("dashboard applies grouped LFG heartbeat batches from passive live events",
       snapshot.applicants.map((entry) => `${entry.characterName}-${entry.realm}:${entry.groupID}`),
       ["Clickedone-Stormrage:11", "Queuedtwo-Thrall:12"]
     );
+    const clickedone = snapshot.applicants.find((entry) => entry.characterName === "Clickedone");
+    assert.equal(clickedone.class, "DEMONHUNTER");
+    assert.equal(clickedone.assignedRole, "DAMAGER");
+    assert.equal(clickedone.itemLevel, 286.4);
+    assert.equal(clickedone.level, 90);
+    assert.equal(snapshot.records.find((record) => record.key === clickedoneKey).className, "DEMONHUNTER");
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

@@ -78,17 +78,70 @@ async function readRequestBody(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-function enrichCharacters(entries, cache) {
+function getCharacterEntryName(entry) {
+  return entry && (entry.characterName || entry.name) ? entry.characterName || entry.name : null;
+}
+
+function getClassHintTimestampMs(entry) {
+  const isoMs = Date.parse((entry && (entry.updatedAt || entry.requestTimestamp || entry.firstSeenAt)) || "");
+  if (Number.isFinite(isoMs)) {
+    return isoMs;
+  }
+  return Number(entry && entry.lastSeenAt ? entry.lastSeenAt : 0) * 1000;
+}
+
+function buildClassHintLookup(entries) {
+  const lookup = new Map();
+  for (const entry of entries || []) {
+    const characterName = getCharacterEntryName(entry);
+    const className = entry && (entry.class || entry.localizedClass || entry.className);
+    if (!entry || !entry.region || !entry.realm || !characterName || !className) {
+      continue;
+    }
+
+    const key = entry.key || buildCacheKey(entry.region, entry.realm, characterName);
+    const candidate = {
+      className,
+      timestampMs: getClassHintTimestampMs(entry),
+      sequence: Number(entry.sequence || 0),
+    };
+    const existing = lookup.get(key);
+    if (
+      !existing ||
+      candidate.timestampMs > existing.timestampMs ||
+      (candidate.timestampMs === existing.timestampMs && candidate.sequence >= existing.sequence)
+    ) {
+      lookup.set(key, candidate);
+    }
+  }
+  return lookup;
+}
+
+function applyRecordClassHint(record, classHintLookup) {
+  if (!record || record.className) {
+    return record || null;
+  }
+
+  const key = buildCacheKey(record.region, record.realm, record.name);
+  const hint = classHintLookup && classHintLookup.get(key);
+  return hint && hint.className ? { ...record, className: hint.className } : record;
+}
+
+function enrichCharacters(entries, cache, classHintLookup = null) {
   return (entries || []).map((entry) => {
-    const key = entry.key || buildCacheKey(entry.region, entry.realm, entry.characterName);
-    const record = getCachedRecord(cache, {
+    const characterName = getCharacterEntryName(entry);
+    const key = entry.key || buildCacheKey(entry.region, entry.realm, characterName);
+    const cachedRecord = getCachedRecord(cache, {
       region: entry.region,
       realm: entry.realm,
-      name: entry.characterName,
+      name: characterName,
     });
+    const record = applyRecordClassHint(cachedRecord, classHintLookup);
+    const hint = classHintLookup && classHintLookup.get(key);
     return {
       ...entry,
       key,
+      class: entry.class || (hint && hint.className) || null,
       record: record || null,
     };
   });
@@ -650,6 +703,11 @@ function buildDashboardState(options = {}) {
     : shouldPreferLiveApplicants(passiveBridge, options.passiveLiveFeedState)
       ? liveApplicants
       : mergeCharacterEntries(savedVariables.parsed.applicants, liveApplicants);
+  const classHintLookup = buildClassHintLookup([
+    ...queue,
+    ...applicants,
+    ...(Array.isArray(options.classHintsOverride) ? options.classHintsOverride : []),
+  ]);
 
   return {
     meta: {
@@ -666,14 +724,17 @@ function buildDashboardState(options = {}) {
     },
     settings: savedVariables.parsed.settings,
     providerState: cache.providerState || {},
-    records: listCachedRecords(cache).map((record) => ({
-      ...record,
-      key: buildCacheKey(record.region, record.realm, record.name),
-    })),
+    records: listCachedRecords(cache).map((record) => {
+      const hintedRecord = applyRecordClassHint(record, classHintLookup);
+      return {
+        ...hintedRecord,
+        key: buildCacheKey(hintedRecord.region, hintedRecord.realm, hintedRecord.name),
+      };
+    }),
     requestStatuses: listRequestStatuses(cache),
     queue,
-    groupMembers: enrichCharacters(savedVariables.parsed.groupMembers, cache),
-    applicants: enrichCharacters(applicants, cache),
+    groupMembers: enrichCharacters(savedVariables.parsed.groupMembers, cache, classHintLookup),
+    applicants: enrichCharacters(applicants, cache, classHintLookup),
     passiveBridge,
     passiveLiveFeed: options.passiveLiveFeedState || null,
     autoSync: options.autoSyncState || {
@@ -1084,12 +1145,18 @@ async function createDashboardServer(options = {}) {
     }
 
     const characterName = entry.characterName || entry.name;
+    const key = buildCacheKey(entry.region, entry.realm, characterName);
+    const lookupHint = passiveQueueRuntime.entries.get(key) || null;
     return {
       ...entry,
-      key: buildCacheKey(entry.region, entry.realm, characterName),
+      key,
       characterName,
       source: entry.source || "applicant",
       requestOrigin: origin || entry.requestOrigin || "savedvariables",
+      class: entry.class || (lookupHint && lookupHint.class) || null,
+      assignedRole: entry.assignedRole || (lookupHint && lookupHint.assignedRole) || null,
+      itemLevel: entry.itemLevel != null ? entry.itemLevel : lookupHint && lookupHint.itemLevel != null ? lookupHint.itemLevel : null,
+      level: entry.level != null ? entry.level : lookupHint && lookupHint.level != null ? lookupHint.level : null,
     };
   }
 
@@ -2116,6 +2183,7 @@ async function createDashboardServer(options = {}) {
       savedVariablesOverride: savedVariables,
       queueOverride: brokerSnapshot.queue,
       applicantsOverride: brokerSnapshot.applicants,
+      classHintsOverride: listPassiveQueueRuntimeEntries(),
       autoSyncState: getAutoSyncState(),
       passiveLiveFeedState: brokerSnapshot.passiveLiveFeedState,
     });
