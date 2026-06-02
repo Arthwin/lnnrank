@@ -15,6 +15,8 @@ const HELPER_PROJECT_PATH = path.join(__dirname, "passive-live-scanner", "Passiv
 const HELPER_SOURCE_PATH = path.join(__dirname, "passive-live-scanner", "Program.cs");
 const HELPER_OUTPUT_DIR = path.join(REPO_ROOT, "output", "passive-live-scanner");
 const HELPER_DLL_PATH = path.join(HELPER_OUTPUT_DIR, "PassiveLiveScanner.dll");
+const DEFAULT_REGION_CACHE_PATH = path.join(REPO_ROOT, "output", "passive-live-regions.json");
+const REGION_CACHE_VERSION = 1;
 const DEFAULT_SCAN_INTERVAL_MS = 500;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 60000;
 const DEFAULT_REGION_SCAN_TIMEOUT_MS = 4000;
@@ -27,6 +29,49 @@ const LIVE_REGION_LIMIT = 12;
 const DEFAULT_DISCOVERY_REFRESH_MS = 2000;
 
 let helperBuildPromise = null;
+
+function normalizePassiveRegion(region) {
+  if (!region || !region.regionBase || !region.regionSize) {
+    return null;
+  }
+
+  return {
+    regionBase: String(region.regionBase),
+    regionSize: String(region.regionSize),
+  };
+}
+
+function buildRegionCacheKey(processId, pool) {
+  return [String(processId || ""), String(pool && pool.key || ""), String(pool && pool.pattern || "")].join("|");
+}
+
+function readPassiveRegionCache(cachePath) {
+  try {
+    if (!cachePath || !fs.existsSync(cachePath)) {
+      return { version: REGION_CACHE_VERSION, pools: {} };
+    }
+
+    const parsed = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+    return parsed && parsed.version === REGION_CACHE_VERSION && parsed.pools && typeof parsed.pools === "object"
+      ? parsed
+      : { version: REGION_CACHE_VERSION, pools: {} };
+  } catch {
+    return { version: REGION_CACHE_VERSION, pools: {} };
+  }
+}
+
+function writePassiveRegionCache(cachePath, cache) {
+  if (!cachePath) {
+    return;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fs.writeFileSync(cachePath, `${JSON.stringify(cache, null, 2)}\n`);
+  } catch {
+    // Region cache is only an optimization; failed writes should not affect live scanning.
+  }
+}
 
 function execFileText(file, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -623,6 +668,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
     Number.parseInt(String(options.discoveryRefreshMs || DEFAULT_DISCOVERY_REFRESH_MS), 10) ||
       DEFAULT_DISCOVERY_REFRESH_MS
   );
+  const regionCachePath = options.regionCachePath || DEFAULT_REGION_CACHE_PATH;
   const state = {
     supported: process.platform === "win32",
     status: "idle",
@@ -890,7 +936,45 @@ function createPassiveLiveFeedMonitor(options = {}) {
     return nextPool;
   }
 
-  function applyDiscoveryResult(pool, result, observedAtIso) {
+  function seedPoolFromRegionCache(pool, wowProcessId) {
+    if (pool.regions.length > 0) {
+      return;
+    }
+
+    const cache = readPassiveRegionCache(regionCachePath);
+    const entry = cache.pools[buildRegionCacheKey(wowProcessId, pool)];
+    const cachedRegions = Array.isArray(entry && entry.regions)
+      ? entry.regions.map(normalizePassiveRegion).filter(Boolean)
+      : [];
+    if (cachedRegions.length <= 0) {
+      return;
+    }
+
+    pool.regions = cachedRegions.slice(0, pool.regionLimit);
+    pool.lastDiscoveredAt = entry.updatedAt || null;
+    pool.consecutiveMisses = 0;
+  }
+
+  function persistPoolRegions(pool, wowProcessId, observedAtIso) {
+    const regions = Array.isArray(pool.regions) ? pool.regions.map(normalizePassiveRegion).filter(Boolean) : [];
+    if (regions.length <= 0) {
+      return;
+    }
+
+    const cache = readPassiveRegionCache(regionCachePath);
+    cache.version = REGION_CACHE_VERSION;
+    cache.pools = cache.pools && typeof cache.pools === "object" ? cache.pools : {};
+    cache.pools[buildRegionCacheKey(wowProcessId, pool)] = {
+      processId: wowProcessId,
+      key: pool.key,
+      pattern: pool.pattern,
+      updatedAt: observedAtIso,
+      regions,
+    };
+    writePassiveRegionCache(regionCachePath, cache);
+  }
+
+  function applyDiscoveryResult(pool, result, observedAtIso, wowProcessId = null) {
     const nextEntries = extractPassiveLiveFeedEntries(result);
     mergeEntries(nextEntries, observedAtIso);
     const selectedRegions = selectPassiveRegionCandidates(result, {
@@ -900,6 +984,9 @@ function createPassiveLiveFeedMonitor(options = {}) {
     pool.regions = mergeDiscoveryRegions(pool.regions, selectedRegions, pool.regionLimit);
     pool.lastDiscoveredAt = observedAtIso;
     pool.consecutiveMisses = 0;
+    if (wowProcessId) {
+      persistPoolRegions(pool, wowProcessId, observedAtIso);
+    }
   }
 
   function startBackgroundDiscovery(pool, wowProcessId, discoveryMaxMatches) {
@@ -915,7 +1002,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
         contextBytes: options.contextBytes || DEFAULT_CONTEXT_BYTES,
       });
       const observedAtIso = new Date().toISOString();
-      applyDiscoveryResult(pool, result, observedAtIso);
+      applyDiscoveryResult(pool, result, observedAtIso, wowProcessId);
       pool.scanDurationMs = Math.max(Number(pool.scanDurationMs || 0), Number(result && result.durationMs) || 0);
       pool.lastScannedAt = observedAtIso;
       recomputeDerivedState();
@@ -958,7 +1045,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
         contextBytes: options.contextBytes || DEFAULT_CONTEXT_BYTES,
       });
       const observedAtIso = new Date().toISOString();
-      applyDiscoveryResult(pool, result, observedAtIso);
+      applyDiscoveryResult(pool, result, observedAtIso, wowProcessId);
       pool.lastScannedAt = observedAtIso;
       pool.scanDurationMs = Number(result && result.durationMs) || Date.now() - scanStartedAt;
       recomputeDerivedState();
@@ -1065,6 +1152,7 @@ function createPassiveLiveFeedMonitor(options = {}) {
       state.wowProcessId = wowProcess.processId;
       await Promise.all(
         duePools.map((pool) => {
+          seedPoolFromRegionCache(pool, wowProcess.processId);
           const task = refreshPool(pool, wowProcess.processId)
             .catch((error) => {
               pool.lastError = error.message || "Passive live feed scan failed.";
