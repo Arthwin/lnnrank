@@ -86,6 +86,24 @@ function addon.GetCurrentRegionSlug()
     return "us"
 end
 
+local function isChallengeModeActive()
+    if type(C_ChallengeMode) == "table" and type(C_ChallengeMode.IsChallengeModeActive) == "function" then
+        local ok, active = pcall(C_ChallengeMode.IsChallengeModeActive)
+        if ok and active == true then
+            return true
+        end
+    end
+
+    if type(IsChallengeModeActive) == "function" then
+        local ok, active = pcall(IsChallengeModeActive)
+        if ok and active == true then
+            return true
+        end
+    end
+
+    return false
+end
+
 function addon.IsSuppressedInCurrentInstance()
     if type(IsInInstance) ~= "function" then
         return false
@@ -96,7 +114,23 @@ function addon.IsSuppressedInCurrentInstance()
         return false
     end
 
-    return instanceType == "party" or instanceType == "raid"
+    if instanceType == "raid" then
+        return true
+    end
+
+    if instanceType ~= "party" then
+        return false
+    end
+
+    local difficultyID = nil
+    if type(GetInstanceInfo) == "function" then
+        local ok, _instanceName, _detectedInstanceType, detectedDifficultyID = pcall(GetInstanceInfo)
+        if ok then
+            difficultyID = tonumber(detectedDifficultyID)
+        end
+    end
+
+    return difficultyID == 8 or isChallengeModeActive()
 end
 
 function addon.NormalizeRealmKey(value)
