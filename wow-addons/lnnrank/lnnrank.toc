@@ -8,6 +8,7 @@
 
 Core.lua
 Settings.lua
+AutoCombatLog.lua
 PassiveChannel.lua
 LiveEventLog.lua
 EventBridge.lua

@@ -15,6 +15,7 @@ local defaults = {
         minimapAngle = 225,
         savedEventBatchEnabled = true,
         passiveChannelEnabled = false,
+        autoCombatLogInstances = true,
     },
     requests = {},
     groupMembers = {},
@@ -426,6 +427,18 @@ function addon.ShouldScanApplicants()
     return getDb().settings.scanApplicants == true
 end
 
+function addon.ShouldAutoCombatLogInstances()
+    return getDb().settings.autoCombatLogInstances ~= false
+end
+
+function addon.SetAutoCombatLogInstances(enabled)
+    getDb().settings.autoCombatLogInstances = enabled == true
+    if type(addon.UpdateAutoCombatLogging) == "function" then
+        addon.UpdateAutoCombatLogging()
+    end
+    addon.NotifyStateChanged()
+end
+
 function addon.GetStatusSummary()
     local db = getDb()
     local manifest = ns.runtime.data and ns.runtime.data.manifest or nil
@@ -595,6 +608,24 @@ local function handleSlashCommand(message)
         return
     end
 
+    if command == "autolog" then
+        local db = getDb()
+        if value == "status" or value == "" then
+            addon.Print(string.format(
+                "instance combat logging %s",
+                db.settings.autoCombatLogInstances ~= false and "enabled" or "disabled"
+            ))
+            return
+        end
+
+        addon.SetAutoCombatLogInstances(value ~= "off")
+        addon.Print(string.format(
+            "instance combat logging %s",
+            db.settings.autoCombatLogInstances ~= false and "enabled" or "disabled"
+        ))
+        return
+    end
+
     if command == "rescan" then
         if type(addon.ScheduleCollectors) == "function" then
             addon.ScheduleCollectors(0.1)
@@ -640,7 +671,7 @@ local function handleSlashCommand(message)
         return
     end
 
-    addon.Print("commands: /lnnrank status | searching on/off | combat on/off | group on/off | applicants on/off | passive on/off/status | livelog | rescan")
+    addon.Print("commands: /lnnrank status | searching on/off | combat on/off | autolog on/off/status | group on/off | applicants on/off | passive on/off/status | livelog | rescan")
 end
 
 SLASH_LNNRANK1 = "/lnnrank"

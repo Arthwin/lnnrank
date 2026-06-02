@@ -191,6 +191,30 @@ local function ensureSettingsPanel()
         end
     )
 
+    local autoCombatLogInstances = createCheckbox(
+        panel,
+        "Auto-enable WoW combat logging in PVE instances",
+        "Turn on WoW's combat log file while inside party, raid, or scenario instances. LNNRank only turns it back off if it started it.",
+        passiveChannel,
+        -10,
+        function()
+            local db = getDb()
+            return not (db and db.settings and db.settings.autoCombatLogInstances == false)
+        end,
+        function(value)
+            if type(addon.SetAutoCombatLogInstances) == "function" then
+                addon.SetAutoCombatLogInstances(value)
+            else
+                local db = getDb()
+                if not db or not db.settings then
+                    return
+                end
+                db.settings.autoCombatLogInstances = value
+            end
+            notifySettingsChanged()
+        end
+    )
+
     panel.refresh = function()
         showSearching:Refresh()
         showInCombat:Refresh()
@@ -198,6 +222,7 @@ local function ensureSettingsPanel()
         scanApplicants:Refresh()
         savedEventBatch:Refresh()
         passiveChannel:Refresh()
+        autoCombatLogInstances:Refresh()
     end
 
     if Settings and type(Settings.RegisterCanvasLayoutCategory) == "function" and

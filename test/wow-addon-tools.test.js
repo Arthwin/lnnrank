@@ -184,6 +184,15 @@ test("staging writes the main addon and generated companion data", () => {
   const staged = stageAddonBundle(tempDir, payload);
 
   assert.equal(fs.existsSync(path.join(staged.stagedMainDir, "lnnrank.toc")), true);
+  assert.equal(fs.existsSync(path.join(staged.stagedMainDir, "AutoCombatLog.lua")), true);
+  assert.match(
+    fs.readFileSync(path.join(staged.stagedMainDir, "lnnrank.toc"), "utf8"),
+    /AutoCombatLog\.lua/
+  );
+  assert.match(
+    fs.readFileSync(path.join(staged.stagedMainDir, "Core.lua"), "utf8"),
+    /autoCombatLogInstances = true/
+  );
   assert.equal(
     fs.existsSync(path.join(staged.stagedCompanionDir, "lnnrank_companion.toc")),
     true
