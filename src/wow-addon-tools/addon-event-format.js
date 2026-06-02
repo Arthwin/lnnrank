@@ -274,16 +274,20 @@ function parseLfgHeartbeatMemberToken(token) {
   let memberIndex = null;
   let className = null;
   let assignedRole = null;
+  const optionalToken = (value) => {
+    const text = String(value || "").trim();
+    return text && text !== "_" ? text : null;
+  };
 
   if (third.startsWith("g")) {
     groupID = parseIntegerField(third.slice(1));
     memberIndex = parseIntegerField(fourth);
-    className = fifth || null;
-    assignedRole = sixth || null;
+    className = optionalToken(fifth);
+    assignedRole = optionalToken(sixth);
   } else {
     memberIndex = parseIntegerField(third);
-    className = fourth || null;
-    assignedRole = fifth || null;
+    className = optionalToken(fourth);
+    assignedRole = optionalToken(fifth);
   }
 
   return {
