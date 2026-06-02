@@ -814,7 +814,7 @@ test("live feed discovery pools stay channel-scoped", () => {
 
 test("addon event parser understands grouped LFG heartbeat member tokens", () => {
   const event = parseAddonEventPayload(
-    "LNNRANK|v=2|e=lfg_status|id=hb-1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=812|t=1780336000123|rg=us|sr=lfg-status|hb=1780336000123|ix=1|tt=1|m=Clickedone~Stormrage~g11~1~DEMONHUNTER~DAMAGER,Queuedtwo~Thrall~g12~2"
+    "LNNRANK|v=2|e=lfg_status|id=hb-1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=812|t=1780336000123|rg=us|sr=lfg-status|hb=1780336000123|ix=1|tt=1|m=Clickedone~Stormrage~g11~1,Queuedtwo~Thrall~g12~2"
   );
 
   assert.equal(event.eventType, "lfg_status");
@@ -824,8 +824,8 @@ test("addon event parser understands grouped LFG heartbeat member tokens", () =>
     realm: "Stormrage",
     groupID: 11,
     memberIndex: 1,
-    class: "DEMONHUNTER",
-    assignedRole: "DAMAGER",
+    class: null,
+    assignedRole: null,
   });
   assert.deepEqual(event.members[1], {
     characterName: "Queuedtwo",

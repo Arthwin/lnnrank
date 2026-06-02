@@ -143,20 +143,12 @@ local function buildHeartbeatMemberToken(member)
         return nil
     end
 
-    local segments = {
+    return table.concat({
         sanitizeSegment(member.characterName, 32),
         sanitizeSegment(member.realm, 32),
         "g" .. sanitizeSegment(member.groupID or 0, 10),
         sanitizeSegment(member.memberIndex or 0, 3),
-    }
-    local class = sanitizeSegment(member.class or "", 16)
-    local assignedRole = sanitizeSegment(member.assignedRole or "", 16)
-    if class ~= "" or assignedRole ~= "" then
-        table.insert(segments, class ~= "" and class or "_")
-        table.insert(segments, assignedRole ~= "" and assignedRole or "_")
-    end
-
-    return table.concat(segments, "~")
+    }, "~")
 end
 
 local function cloneArray(values)
