@@ -663,6 +663,30 @@ test("live feed extraction normalizes escaped chat transport payloads", () => {
   );
 });
 
+test("live feed extraction does not attach heartbeat fields to search payloads", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xDAD1",
+        encoding: "utf8",
+        previewUtf8:
+          "noise...LNNRANK||v=2||e=search||id=f24cf40328-79298||ch=lnnrank0ff24cf4||ss=f24cf40328||n=79298||t=1780362112254||rg=us||sr=world||re=Stormrage||nm=Swiftyam.0381344||ix=1||tt=1||m=Whitway~Azralon~g52~1,Mahgia~Tichondrius~g52~2",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(
+    entries[0].preview,
+    "LNNRANK|v=2|e=search|id=f24cf40328-79298|ch=lnnrank0ff24cf4|ss=f24cf40328|n=79298|t=1780362112254|rg=us|sr=world|re=Stormrage|nm=Swiftyam"
+  );
+  const event = parseAddonEventPayload(entries[0].preview);
+  assert.equal(event.characterName, "Swiftyam");
+  assert.equal(event.groupID, null);
+  assert.equal(event.memberIndex, null);
+});
+
 test("live feed extraction trims noisy grouped lfg heartbeat payloads to complete member tokens", () => {
   const entries = extractPassiveLiveFeedEntries({
     matches: [

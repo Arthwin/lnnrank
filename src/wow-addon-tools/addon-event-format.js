@@ -81,6 +81,10 @@ const PAYLOAD_FIELD_PATTERNS = {
   m: new RegExp(`^(?:_|${ADDON_MEMBER_TOKEN_PATTERN}(?:,${ADDON_MEMBER_TOKEN_PATTERN}){0,31})`, "u"),
 };
 
+const COMMON_PAYLOAD_FIELDS = new Set(["v", "e", "id", "ch", "ss", "pk", "n", "t", "rg", "sr"]);
+const SEARCH_PAYLOAD_FIELDS = new Set(["re", "nm", "ai", "gi", "mi", "ar", "cl", "il", "lv"]);
+const LFG_STATUS_PAYLOAD_FIELDS = new Set(["hb", "ix", "tt", "m", "re", "nm"]);
+
 function normalizeAddonFields(fields = {}) {
   const normalized = {};
   for (const [key, value] of Object.entries(fields || {})) {
@@ -118,6 +122,27 @@ function isAddonFieldRemainderAcceptable(key, remainder) {
   }
 
   return false;
+}
+
+function isFieldAllowedForCurrentPayload(fields, key) {
+  if (COMMON_PAYLOAD_FIELDS.has(key)) {
+    return true;
+  }
+
+  const { eventType, source } = detectAddonEventType(fields);
+  if (eventType === "search") {
+    return SEARCH_PAYLOAD_FIELDS.has(key);
+  }
+
+  if (eventType === "lfg_status") {
+    return LFG_STATUS_PAYLOAD_FIELDS.has(key);
+  }
+
+  if (source === "appclear") {
+    return key === "re" || key === "nm";
+  }
+
+  return true;
 }
 
 function isCompleteAddonPayloadFields(fields) {
@@ -203,6 +228,10 @@ function extractCanonicalPayload(text) {
     const key = segment.slice(0, separatorIndex);
     const valuePattern = PAYLOAD_FIELD_PATTERNS[key];
     if (!valuePattern) {
+      break;
+    }
+
+    if (!isFieldAllowedForCurrentPayload(canonicalFields, key)) {
       break;
     }
 

@@ -966,10 +966,10 @@ async function createDashboardServer(options = {}) {
     );
   }
 
-function buildBrokeredPassiveLiveFeedState(rawState, passiveLiveScope) {
-  if (!rawState) {
-    return null;
-  }
+  function buildBrokeredPassiveLiveFeedState(rawState, passiveLiveScope) {
+    if (!rawState) {
+      return null;
+    }
 
     return {
       ...rawState,
