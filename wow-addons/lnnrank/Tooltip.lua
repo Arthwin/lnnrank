@@ -579,10 +579,15 @@ local function renderStatus(tooltip, status, queuedLocally)
             tooltip:AddLine("|cffffcc66Lookup queued locally.|r")
             tooltip:AddLine("|cffd7d7d7Let the desktop app sync, then reload WoW to import the result.|r")
         else
-            tooltip:AddLine("|cffffff99No Warcraft Logs lookup has run for this character yet.|r")
-            tooltip:AddLine("|cffd7d7d7Ctrl-click the player, unit frame, or chat name link to queue a lookup.|r")
-            tooltip:AddLine("|cffd7d7d7LFG applicants are queued automatically when they appear.|r")
+            tooltip:AddLine("|cffffff99No data found.|r")
+            tooltip:AddLine("|cffd7d7d7Ctrl-click to search.|r")
         end
+        return
+    end
+
+    if status.state == "not_found" then
+        tooltip:AddLine("|cffffff99No data found.|r")
+        tooltip:AddLine("|cffd7d7d7Ctrl-click to search.|r")
         return
     end
 
@@ -655,7 +660,7 @@ local function renderRecord(tooltip, record)
         end
     end
 
-    tooltip:AddLine("|cffd7d7d7Ctrl-click the player, unit frame, or chat link to refresh this character.|r")
+    tooltip:AddLine("|cffd7d7d7Ctrl-click to refresh.|r")
 end
 
 function addon.AppendCharacterTooltip(tooltip, region, realmName, characterName)
