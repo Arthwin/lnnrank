@@ -33,7 +33,9 @@ const {
   acquireReusableWebLookupSession,
   createWebLookupSession,
   fetchCharacterViaProvider,
+  fetchCharactersViaApiBatch,
   fetchSingleCharacterViaApi,
+  hasApiCredentials,
   recordNeedsWebEnrichment,
   resolveLookupProvider,
 } = require("./live-provider");
@@ -44,6 +46,10 @@ const { loadSavedVariablesFile } = require("./saved-variables");
 const DEFAULT_SYNC_WORKERS = Math.max(
   1,
   Number.parseInt(process.env.WCL_SYNC_WORKERS || "1", 10) || 1
+);
+const DEFAULT_API_BATCH_SIZE = Math.max(
+  1,
+  Number.parseInt(process.env.WCL_API_BATCH_SIZE || "3", 10) || 3
 );
 
 function normalizeRoleHint(value) {
@@ -56,6 +62,14 @@ function getExpectedParseMetricForRole(roleValue) {
 
 function resolveSyncWorkerCount(provider, options = {}) {
   const rawValue = options.workers == null ? DEFAULT_SYNC_WORKERS : options.workers;
+  return Math.max(1, Number.parseInt(String(rawValue), 10) || 1);
+}
+
+function resolveApiBatchSize(provider, options = {}) {
+  if (provider === "web" || provider === "off") {
+    return 1;
+  }
+  const rawValue = options.apiBatchSize ?? options.batchSize ?? DEFAULT_API_BATCH_SIZE;
   return Math.max(1, Number.parseInt(String(rawValue), 10) || 1);
 }
 
@@ -161,6 +175,10 @@ async function runAddonRequestSync(options = {}) {
     ? path.resolve(String(options.addonsDir))
     : DEFAULT_WOW_ADDONS_DIR;
   const workerCount = resolveSyncWorkerCount(provider, options);
+  const apiBatchSize = resolveApiBatchSize(provider, options);
+  const apiBatchingEnabled =
+    apiBatchSize > 1 &&
+    (provider === "api" || (provider === "auto" && hasApiCredentials()));
   const reuseBrowserSession = options.reuseBrowserSession !== false && workerCount === 1;
 
   const manualRequests = listManualRequests(cache).map((request) => ({
@@ -349,6 +367,7 @@ async function runAddonRequestSync(options = {}) {
   await runLookupWorkers({
     queue: lookupQueue,
     workerCount,
+    batchSize: apiBatchingEnabled ? apiBatchSize : 1,
     createWorker: async () => {
       let webSessionHandle = null;
       async function fetchWithWeb(lookup) {
@@ -401,6 +420,92 @@ async function runAddonRequestSync(options = {}) {
         }
       }
 
+      async function fetchWithApiBatch(entries) {
+        providerCooldown = getProviderCooldown(cache, "api");
+        if (providerCooldown.isCoolingDown) {
+          throw new ProviderCooldownError("api", providerCooldown);
+        }
+        try {
+          const results = await fetchCharactersViaApiBatch(entries.map((entry) => entry.lookup));
+          providerCooldown = markProviderAttempt(cache, "api", {
+            cooldownMs: 0,
+          });
+          saveCache(cache, cachePath);
+          providersUsed.add("api");
+          return results.map((result) => ({
+            ...result,
+            providerUsed: "api",
+          }));
+        } catch (error) {
+          providerCooldown = markProviderAttempt(cache, "api", {
+            cooldownMs: API_ATTEMPT_COOLDOWN_MS,
+          });
+          saveCache(cache, cachePath);
+          throw error;
+        }
+      }
+
+      async function fetchBatch(entries) {
+        if (!apiBatchingEnabled || entries.length <= 1) {
+          const results = [];
+          for (const entry of entries) {
+            results.push(await fetchCharacterViaProvider(entry.lookup, {
+              provider,
+              fetchApi: fetchWithApi,
+              fetchWeb: fetchWithWeb,
+              needsWebEnrichment: recordNeedsWebEnrichment,
+            }));
+          }
+          return results;
+        }
+
+        if (provider === "api") {
+          return fetchWithApiBatch(entries);
+        }
+
+        try {
+          const apiResults = await fetchWithApiBatch(entries);
+          const results = [];
+          for (let index = 0; index < entries.length; index += 1) {
+            const apiResult = apiResults[index];
+            if (apiResult.found && apiResult.record && recordNeedsWebEnrichment(apiResult.record)) {
+              try {
+                results.push({
+                  ...(await fetchWithWeb(entries[index].lookup)),
+                  providerUsed: "web",
+                  fallbackFrom: "api",
+                  fallbackReason: "API result was incomplete and was enriched from the web page.",
+                });
+              } catch {
+                results.push({
+                  ...apiResult,
+                  providerUsed: "api",
+                  fallbackFrom: "api",
+                  fallbackReason: "API result was incomplete, but web enrichment failed.",
+                });
+              }
+            } else {
+              results.push(apiResult);
+            }
+          }
+          return results;
+        } catch (error) {
+          if (error instanceof WclRateLimitError) {
+            throw error;
+          }
+          const results = [];
+          for (const entry of entries) {
+            results.push({
+              ...(await fetchWithWeb(entry.lookup)),
+              providerUsed: "web",
+              fallbackFrom: "api",
+              fallbackReason: error.message || "API batch lookup failed before web fallback.",
+            });
+          }
+          return results;
+        }
+      }
+
       return {
         async fetch(lookup) {
           return fetchCharacterViaProvider(lookup, {
@@ -410,6 +515,7 @@ async function runAddonRequestSync(options = {}) {
             needsWebEnrichment: recordNeedsWebEnrichment,
           });
         },
+        fetchBatch,
         async close() {
           if (webSessionHandle) {
             await webSessionHandle.close();
@@ -617,6 +723,7 @@ async function runAddonRequestSync(options = {}) {
     cachedRecords: listCachedRecords(cache).length,
     provider,
     workers: workerCount,
+    apiBatchSize: apiBatchingEnabled ? apiBatchSize : 1,
     providerCooldown,
     statuses: statusEntries,
     staged,

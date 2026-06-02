@@ -55,7 +55,7 @@ const {
 const DEFAULT_PORT = Number.parseInt(process.env.WCL_DASHBOARD_PORT || "47832", 10);
 const DEFAULT_DASHBOARD_SYNC_WORKERS = Math.max(
   1,
-  Number.parseInt(process.env.WCL_DASHBOARD_SYNC_WORKERS || process.env.WCL_SYNC_WORKERS || "2", 10) || 2
+  Number.parseInt(process.env.WCL_DASHBOARD_SYNC_WORKERS || process.env.WCL_SYNC_WORKERS || "4", 10) || 4
 );
 const DASHBOARD_ROOT = path.join(__dirname, "dashboard");
 const DASHBOARD_ASSET_PATHS = [

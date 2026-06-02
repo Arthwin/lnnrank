@@ -78,6 +78,53 @@ const CHARACTER_QUERY = `
   }
 `;
 
+const CHARACTER_DUAL_METRIC_QUERY = `
+  query CharacterLookupDualMetric(
+    $name: String!,
+    $serverSlug: String!,
+    $serverRegion: String!,
+    $zoneId: Int!,
+    $scoreMetric: CharacterPageRankingMetricType!,
+    $parseMetric: CharacterPageRankingMetricType!
+  ) {
+    characterData {
+      character(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
+        id
+        canonicalID
+        name
+        hidden
+        server {
+          name
+          slug
+          normalizedName
+          region {
+            name
+            slug
+            compactName
+          }
+        }
+        scoreRankings: zoneRankings(
+          zoneID: $zoneId,
+          metric: $scoreMetric,
+          timeframe: Historical,
+          includePrivateLogs: false
+        )
+        parseRankings: zoneRankings(
+          zoneID: $zoneId,
+          metric: $parseMetric,
+          timeframe: Historical,
+          includePrivateLogs: false
+        )
+      }
+    }
+    rateLimitData {
+      limitPerHour
+      pointsSpentThisHour
+      pointsResetIn
+    }
+  }
+`;
+
 function resolveLookupProvider(value) {
   const provider = String(value || process.env.WCL_LOOKUP_PROVIDER || DEFAULT_LOOKUP_PROVIDER).toLowerCase();
   if (!SUPPORTED_LOOKUP_PROVIDERS.has(provider)) {
@@ -692,7 +739,15 @@ async function fetchSingleCharacterViaApiMetric(lookup, metric, options = {}) {
     };
   }
 
-  const zoneStats = extractZoneStats(character.zoneRankings, collectedAt);
+  return buildApiMetricResult(lookup, character, character.zoneRankings, metric, {
+    collectedAt,
+    rateLimit: response.rateLimitData || null,
+  });
+}
+
+function buildApiMetricResult(lookup, character, zoneRankings, metric, options = {}) {
+  const collectedAt = options.collectedAt || formatIsoTimestamp();
+  const zoneStats = extractZoneStats(zoneRankings, collectedAt);
   const specInfo = getSpecInfo(zoneStats.specName);
   return {
     found: true,
@@ -709,17 +764,145 @@ async function fetchSingleCharacterViaApiMetric(lookup, metric, options = {}) {
       wclCharacterId: character.canonicalID || character.id || null,
       dungeons: zoneStats.dungeons,
     }),
-    rateLimit: response.rateLimitData || null,
+    rateLimit: options.rateLimit || null,
   };
 }
 
-async function runApiCharacterPipeline(lookup) {
-  const client = new WclClient();
-  const collectedAt = formatIsoTimestamp();
-  const baseResult = await fetchSingleCharacterViaApiMetric(lookup, "playerscore", {
-    client,
-    collectedAt,
+async function fetchSingleCharacterViaApiDualMetric(lookup, parseMetric, options = {}) {
+  const client = options.client || new WclClient();
+  const collectedAt = options.collectedAt || formatIsoTimestamp();
+  const response = await client.graphQlRequest(CHARACTER_DUAL_METRIC_QUERY, {
+    name: lookup.name,
+    serverSlug: slugifyRealm(lookup.realm),
+    serverRegion: lookup.region.toUpperCase(),
+    zoneId: 47,
+    scoreMetric: "playerscore",
+    parseMetric,
   });
+
+  const character = response.characterData && response.characterData.character;
+  const rateLimit = response.rateLimitData || null;
+  if (!character) {
+    return {
+      found: false,
+      baseResult: null,
+      metricResult: null,
+      rateLimit,
+    };
+  }
+
+  return {
+    found: true,
+    baseResult: buildApiMetricResult(lookup, character, character.scoreRankings, "playerscore", {
+      collectedAt,
+      rateLimit,
+    }),
+    metricResult: buildApiMetricResult(lookup, character, character.parseRankings, parseMetric, {
+      collectedAt,
+      rateLimit,
+    }),
+    prefetchedMetric: parseMetric,
+    rateLimit,
+  };
+}
+
+function getHintedApiMetric(lookup) {
+  const hintedRole = normalizeRoleHint(lookup.roleHint || lookup.assignedRole || lookup.role);
+  const hintedMetric = getPreferredMetricForRole(hintedRole);
+  return hintedMetric && hintedMetric !== "playerscore" ? hintedMetric : null;
+}
+
+function buildApiBatchMetricQuery(lookups) {
+  const variables = {
+    zoneId: 47,
+    scoreMetric: "playerscore",
+  };
+  const variableDefs = [
+    "$zoneId: Int!",
+    "$scoreMetric: CharacterPageRankingMetricType!",
+  ];
+  const fields = [];
+  const prefetchedMetrics = [];
+
+  lookups.forEach((lookup, index) => {
+    const prefetchedMetric = getHintedApiMetric(lookup) || "dps";
+    const suffix = String(index);
+    variables[`name${suffix}`] = lookup.name;
+    variables[`serverSlug${suffix}`] = slugifyRealm(lookup.realm);
+    variables[`serverRegion${suffix}`] = lookup.region.toUpperCase();
+    variables[`parseMetric${suffix}`] = prefetchedMetric;
+    variableDefs.push(
+      `$name${suffix}: String!`,
+      `$serverSlug${suffix}: String!`,
+      `$serverRegion${suffix}: String!`,
+      `$parseMetric${suffix}: CharacterPageRankingMetricType!`
+    );
+    prefetchedMetrics.push(prefetchedMetric);
+    fields.push(`
+      c${suffix}: character(
+        name: $name${suffix},
+        serverSlug: $serverSlug${suffix},
+        serverRegion: $serverRegion${suffix}
+      ) {
+        id
+        canonicalID
+        name
+        hidden
+        server {
+          name
+          slug
+          normalizedName
+          region {
+            name
+            slug
+            compactName
+          }
+        }
+        scoreRankings: zoneRankings(
+          zoneID: $zoneId,
+          metric: $scoreMetric,
+          timeframe: Historical,
+          includePrivateLogs: false
+        )
+        parseRankings: zoneRankings(
+          zoneID: $zoneId,
+          metric: $parseMetric${suffix},
+          timeframe: Historical,
+          includePrivateLogs: false
+        )
+      }
+    `);
+  });
+
+  return {
+    query: `
+      query CharacterLookupBatch(${variableDefs.join(", ")}) {
+        characterData {
+          ${fields.join("\n")}
+        }
+        rateLimitData {
+          limitPerHour
+          pointsSpentThisHour
+          pointsResetIn
+        }
+      }
+    `,
+    variables,
+    prefetchedMetrics,
+  };
+}
+
+async function finishApiCharacterPipelineFromDualResult(lookup, dualResult, options = {}) {
+  const client = options.client || new WclClient();
+  const collectedAt = options.collectedAt || formatIsoTimestamp();
+  if (!dualResult.found || !dualResult.baseResult) {
+    return {
+      found: false,
+      record: null,
+      rateLimit: dualResult.rateLimit || null,
+    };
+  }
+  const baseResult = dualResult.baseResult;
   if (!baseResult.found || !baseResult.record) {
     return baseResult;
   }
@@ -748,10 +931,13 @@ async function runApiCharacterPipeline(lookup) {
     return baseResult;
   }
 
-  const metricResult = await fetchSingleCharacterViaApiMetric(lookup, preferredMetric, {
-    client,
-    collectedAt,
-  });
+  const metricResult =
+    preferredMetric === dualResult.prefetchedMetric
+      ? dualResult.metricResult
+      : await fetchSingleCharacterViaApiMetric(lookup, preferredMetric, {
+          client,
+          collectedAt,
+        });
   if (!metricResult.found || !metricResult.record) {
     return {
       ...baseResult,
@@ -764,6 +950,70 @@ async function runApiCharacterPipeline(lookup) {
     record: mergeMetricRecord(baseResult.record, metricResult.record),
     rateLimit: metricResult.rateLimit || baseResult.rateLimit || null,
   };
+}
+
+async function runApiCharacterPipeline(lookup) {
+  const client = new WclClient();
+  const collectedAt = formatIsoTimestamp();
+  const prefetchedMetric = getHintedApiMetric(lookup) || "dps";
+  const dualResult = await fetchSingleCharacterViaApiDualMetric(lookup, prefetchedMetric, {
+    client,
+    collectedAt,
+  });
+  return finishApiCharacterPipelineFromDualResult(lookup, dualResult, {
+    client,
+    collectedAt,
+  });
+}
+
+async function fetchCharactersViaApiBatch(rawLookups, options = {}) {
+  const lookups = (rawLookups || []).map((lookup) => normalizeLookupInput(lookup));
+  if (lookups.length === 0) {
+    return [];
+  }
+  if (lookups.length === 1) {
+    return [await runApiCharacterPipeline(lookups[0])];
+  }
+
+  const client = options.client || new WclClient();
+  const collectedAt = options.collectedAt || formatIsoTimestamp();
+  const batch = buildApiBatchMetricQuery(lookups);
+  const response = await client.graphQlRequest(batch.query, batch.variables);
+  const characterData = response.characterData || {};
+  const rateLimit = response.rateLimitData || null;
+
+  return Promise.all(
+    lookups.map((lookup, index) => {
+      const character = characterData[`c${index}`];
+      const prefetchedMetric = batch.prefetchedMetrics[index];
+      const dualResult = character
+        ? {
+            found: true,
+            baseResult: buildApiMetricResult(lookup, character, character.scoreRankings, "playerscore", {
+              collectedAt,
+              rateLimit,
+            }),
+            metricResult: buildApiMetricResult(lookup, character, character.parseRankings, prefetchedMetric, {
+              collectedAt,
+              rateLimit,
+            }),
+            prefetchedMetric,
+            rateLimit,
+          }
+        : {
+            found: false,
+            baseResult: null,
+            metricResult: null,
+            prefetchedMetric,
+            rateLimit,
+          };
+
+      return finishApiCharacterPipelineFromDualResult(lookup, dualResult, {
+        client,
+        collectedAt,
+      });
+    })
+  );
 }
 
 async function fetchSingleCharacterViaApi({ region, realm, name, roleHint, assignedRole, role, classNameHint, className }) {
@@ -876,6 +1126,9 @@ async function fetchCharacterViaProvider(lookup, options = {}) {
           providerUsed: "api",
         };
       } catch (error) {
+        if (error instanceof WclRateLimitError) {
+          throw error;
+        }
         return {
           ...(await fetchWeb(lookup)),
           providerUsed: "web",
@@ -1002,6 +1255,7 @@ module.exports = {
   acquireReusableWebLookupSession,
   createWebLookupSession,
   fetchCharacterViaProvider,
+  fetchCharactersViaApiBatch,
   fetchSingleCharacterViaApi,
   fetchSingleCharacterViaWeb,
   hasApiCredentials,

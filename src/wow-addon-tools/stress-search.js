@@ -31,6 +31,7 @@ function printUsage() {
       "Optional flags:",
       "  --count <number>          Number of lookups to run (default: 30)",
       "  --workers <number>        Worker count to pass to the sync service",
+      "  --api-batch-size <number> API/auto characters per WCL batch request (default: 5)",
       `  --provider <auto|web|api|off> Lookup provider (default: ${DEFAULT_LOOKUP_PROVIDER})`,
       "  --db-path <path>          Source DB to clone for the run",
       "  --run-dir <path>          Output directory for this stress run",
@@ -320,6 +321,8 @@ async function main() {
   const workers = rawWorkers == null ? null : parsePositiveInt(rawWorkers, 1);
   const force = parseBoolean(getOptionValue(options, positionals, "force", 3, true), true);
   const prewarmApi = parseBoolean(getOptionValue(options, positionals, "prewarm-api", 8, true), true);
+  const rawApiBatchSize = getOptionValue(options, positionals, "api-batch-size", 9, null);
+  const apiBatchSize = rawApiBatchSize == null ? null : parsePositiveInt(rawApiBatchSize, 1);
   const sourceDbPath = path.resolve(String(getOptionValue(options, positionals, "db-path", 4, DEFAULT_CACHE_PATH)));
   const runDir = path.resolve(String(getOptionValue(options, positionals, "run-dir", 5, path.join(DEFAULT_STRESS_ROOT, safeRunId()))));
   const stressDbPath = path.join(runDir, "lnnrank-db.json");
@@ -382,6 +385,7 @@ async function main() {
     browserPath,
     requests,
     workers,
+    apiBatchSize,
     installWow: false,
     onUpdate: async (update) => {
       updates.push({
@@ -405,6 +409,8 @@ async function main() {
     provider,
     workers: result.workers,
     requestedWorkers: workers,
+    apiBatchSize: result.apiBatchSize,
+    requestedApiBatchSize: apiBatchSize,
     force,
     apiPrewarm,
     requestedCount: requests.length,
@@ -433,6 +439,7 @@ async function main() {
       `  completed: ${summary.completed}/${requests.length}`,
       `  states: ${JSON.stringify(summary.stateCounts)}`,
       `  run: ${formatMs(summary.totalRunDurationMs)}`,
+      `  api batch size: ${result.apiBatchSize || 1}`,
       `  lookup avg/p50/p90/max: ${formatMs(summary.lookupDurationMs.avg)} / ${formatMs(summary.lookupDurationMs.p50)} / ${formatMs(summary.lookupDurationMs.p90)} / ${formatMs(summary.lookupDurationMs.max)}`,
       `  wait avg/p50/p90/max: ${formatMs(summary.queueWaitMs.avg)} / ${formatMs(summary.queueWaitMs.p50)} / ${formatMs(summary.queueWaitMs.p90)} / ${formatMs(summary.queueWaitMs.max)}`,
       `  throughput: ${summary.throughputPerMinute == null ? "-" : summary.throughputPerMinute.toFixed(2)} lookups/min`,

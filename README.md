@@ -179,16 +179,17 @@ Current timing visibility:
 - the Search view worker strip shows worker count plus current/last lookup duration
 - queue rows and cached result rows show compact timing labels when a matching status exists
 
-Dashboard auto-sync defaults to `auto` provider mode and `2` workers. With WCL
-API credentials available, the dashboard prewarms the API token in the background
-so individual searches avoid the OAuth startup cost and usually stay under one
-second. Use `WCL_DASHBOARD_SYNC_WORKERS=1` if you want to compare against
-single-worker behavior or reduce concurrent Warcraft Logs requests.
+Dashboard auto-sync defaults to `auto` provider mode, `4` workers, and WCL API
+batches of `3` characters. With WCL API credentials available, the dashboard
+prewarms the API token in the background and uses aliased GraphQL requests to
+fetch score plus the likely parse metric in one round trip. Use
+`WCL_DASHBOARD_SYNC_WORKERS=1` or `WCL_API_BATCH_SIZE=1` if you want to compare
+against single-worker or non-batched behavior.
 
 Manual stress runs:
 
 ```powershell
-npm run stress:search -- 30 2 web
+npm run stress:search -- --count 30 --workers 4 --provider auto --api-batch-size 3
 ```
 
 This command clones the current local DB into `output/search-stress/<timestamp>`
@@ -198,13 +199,14 @@ or installed addon payload. Each run writes:
 - `stress-report.json`: full lookup, status, update, and summary data
 - `stress-report.csv`: per-character timing rows for quick inspection
 
-Use `--force false` for a cache-path baseline, or `--run-dir <path>` to choose a
-specific output folder. API/auto stress runs prewarm the WCL token by default to
-match dashboard behavior; use `--prewarm-api false` to measure cold startup.
-Direct Node invocation also supports named flags:
+Use `--force false` for a cache-path baseline, `--api-batch-size 1` to disable
+API character batching, or `--run-dir <path>` to choose a specific output
+folder. API/auto stress runs prewarm the WCL token by default to match dashboard
+behavior; use `--prewarm-api false` to measure cold startup. Direct Node
+invocation also supports named flags:
 
 ```powershell
-node src/wow-addon-tools/stress-search.js --count 30 --workers 2 --provider web
+node src/wow-addon-tools/stress-search.js --count 30 --workers 4 --provider auto --api-batch-size 3
 ```
 
 ## Container note

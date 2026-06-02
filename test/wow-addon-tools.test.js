@@ -16,6 +16,7 @@ const {
   stageAddonBundle,
 } = require("../src/wow-addon-tools/lnnrank-bridge");
 const {
+  WclRateLimitError,
   buildRecordFromWebSnapshot,
   fetchCharacterViaProvider,
   normalizeLookupInput,
@@ -598,4 +599,42 @@ test("shared provider helper upgrades incomplete auto API results with a web fet
   assert.deepEqual(calls, ["api", "web"]);
   assert.equal(result.providerUsed, "web");
   assert.equal(result.fallbackFrom, "api");
+});
+
+test("shared provider helper preserves WCL rate-limit errors instead of web fan-out", async () => {
+  const calls = [];
+
+  await assert.rejects(
+    () =>
+      fetchCharacterViaProvider(
+        {
+          region: "us",
+          realm: "Stormrage",
+          name: "Atiezh",
+        },
+        {
+          provider: "auto",
+          hasApiCredentials: true,
+          fetchApi: async () => {
+            calls.push("api");
+            throw new WclRateLimitError("rate limited", {
+              retryAfterSeconds: 60,
+            });
+          },
+          fetchWeb: async () => {
+            calls.push("web");
+            return {
+              found: true,
+              record: {
+                score: 2882.62,
+                dungeons: [],
+              },
+            };
+          },
+        }
+      ),
+    WclRateLimitError
+  );
+
+  assert.deepEqual(calls, ["api"]);
 });

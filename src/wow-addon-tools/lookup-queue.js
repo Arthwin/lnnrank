@@ -64,6 +64,24 @@ class LookupQueue extends EventEmitter {
     }
   }
 
+  async nextBatch(maxSize = 1) {
+    const first = await this.next();
+    if (!first) {
+      return null;
+    }
+
+    const batch = [first];
+    const batchSize = Math.max(1, Number.parseInt(String(maxSize), 10) || 1);
+    while (batch.length < batchSize && this.pending.length > 0) {
+      const entry = this.pending.shift();
+      this.pendingKeys.delete(entry.key);
+      this.inFlightKeys.add(entry.key);
+      this.emit("dequeued", entry);
+      batch.push(entry);
+    }
+    return batch;
+  }
+
   complete(entry, result) {
     this.inFlightKeys.delete(entry.key);
     this.emit("completed", { entry, result });
@@ -84,34 +102,60 @@ class LookupQueue extends EventEmitter {
 async function runLookupWorkers({
   queue,
   workerCount,
+  batchSize = 1,
   createWorker,
   handleStart,
   handleResult,
   handleError,
 }) {
   const count = Math.max(1, workerCount || 1);
+  const maxBatchSize = Math.max(1, Number.parseInt(String(batchSize), 10) || 1);
   const workers = Array.from({ length: count }, async (_, index) => {
     const worker = await createWorker(index);
     try {
       while (true) {
-        const entry = await queue.next();
-        if (!entry) {
+        const entries =
+          maxBatchSize > 1 && worker && typeof worker.fetchBatch === "function"
+            ? await queue.nextBatch(maxBatchSize)
+            : await queue.next().then((entry) => (entry ? [entry] : null));
+        if (!entries || entries.length === 0) {
           break;
         }
 
         try {
-          if (handleStart) {
-            await handleStart(entry, index);
+          for (const entry of entries) {
+            if (handleStart) {
+              await handleStart(entry, index);
+            }
           }
-          const result = await worker.fetch(entry.lookup);
-          queue.complete(entry, result);
-          if (handleResult) {
-            await handleResult(entry, result, index);
+
+          if (entries.length > 1 && worker && typeof worker.fetchBatch === "function") {
+            const results = await worker.fetchBatch(entries);
+            if (!Array.isArray(results) || results.length !== entries.length) {
+              throw new Error("Batch lookup worker returned an invalid result set.");
+            }
+            for (let resultIndex = 0; resultIndex < entries.length; resultIndex += 1) {
+              const entry = entries[resultIndex];
+              const result = results[resultIndex];
+              queue.complete(entry, result);
+              if (handleResult) {
+                await handleResult(entry, result, index);
+              }
+            }
+          } else {
+            const entry = entries[0];
+            const result = await worker.fetch(entry.lookup);
+            queue.complete(entry, result);
+            if (handleResult) {
+              await handleResult(entry, result, index);
+            }
           }
         } catch (error) {
-          queue.fail(entry, error);
-          if (handleError) {
-            await handleError(entry, error, index);
+          for (const entry of entries) {
+            queue.fail(entry, error);
+            if (handleError) {
+              await handleError(entry, error, index);
+            }
           }
         }
       }
