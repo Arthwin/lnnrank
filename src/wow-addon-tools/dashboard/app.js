@@ -113,6 +113,10 @@ function resolveWowClassColor(value) {
   return token ? WOW_CLASS_COLORS[token] || null : null;
 }
 
+function resolveLfgClassColor(entry, record) {
+  return resolveWowClassColor(entry && entry.class) || resolveWowClassColor(record && record.className);
+}
+
 function formatShortDate(value) {
   if (!value) {
     return "Unknown";
@@ -1372,7 +1376,7 @@ function renderLfgMemberRow(entry, data) {
     averageParse == null ? "" : `${formatCompactNumber(Math.round(averageParse), 0)}%`;
   const averageParseClass = toneClassForParsePercent(averageParse);
   const nameToneClass = toneClassForBlendedPerformance(record, averageParse);
-  const classColor = resolveWowClassColor((record && record.className) || entry.class);
+  const classColor = resolveLfgClassColor(entry, record);
   const nameStyle = classColor ? ` style="color: ${escapeHtml(classColor)}"` : "";
   const nameClassAttr = classColor ? "" : ` class="${escapeHtml(nameToneClass)}"`;
   const regionInfo = entry.region ? String(entry.region).toUpperCase() : "";
