@@ -634,6 +634,51 @@ test("sync progress installs companion payload before reporting update", async (
   assert.equal(sawInstalledPayloadDuringUpdate, true);
 });
 
+test("sync statuses include search timing fields", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-sync-timing-"));
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const key = buildCacheKey("us", "Stormrage", "Timingone");
+  const queuedAt = new Date(Date.now() - 10000).toISOString();
+
+  fs.mkdirSync(tempDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, manualRequests: {}, requestStatuses: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+
+  const result = await runAddonRequestSync({
+    dbPath,
+    outputDir,
+    provider: "off",
+    requests: [
+      {
+        region: "us",
+        realm: "Stormrage",
+        characterName: "Timingone",
+        requestOrigin: "manual",
+        requestSource: "manual",
+        statusSource: "manual",
+        updatedAt: queuedAt,
+      },
+    ],
+  });
+
+  assert.equal(result.statuses.length, 1);
+  const status = result.statuses[0];
+  assert.equal(status.state, "disabled");
+  assert.equal(status.queuedAt, queuedAt);
+  assert.ok(Date.parse(status.startedAt) >= Date.parse(queuedAt));
+  assert.ok(Date.parse(status.finishedAt) >= Date.parse(status.startedAt));
+  assert.ok(status.lookupDurationMs >= 0);
+  assert.ok(status.totalDurationMs >= status.lookupDurationMs);
+
+  const saved = JSON.parse(fs.readFileSync(dbPath, "utf8"));
+  assert.equal(saved.requestStatuses[key].lookupDurationMs, status.lookupDurationMs);
+  assert.equal(saved.requestStatuses[key].totalDurationMs, status.totalDurationMs);
+});
+
 test("sync request builder reuses the exact queue snapshot shown in the app", () => {
   const requests = buildSyncRequestsFromQueue([
     {
@@ -2966,13 +3011,30 @@ test("dashboard auto sync recovers after an earlier queue-empty skip", async () 
     outputDir,
     addonsDir,
     provider: "api",
+    syncWorkers: 3,
     disableBackgroundTick: true,
     testHooks,
     runAddonRequestSync: async (options) => {
       syncCalls += 1;
       lastSyncOptions = options;
+      if (options.onUpdate) {
+        await options.onUpdate({
+          phase: "lookup-start",
+          lookup: {
+            region: "us",
+            realm: "Stormrage",
+            name: "Urmomgargles",
+          },
+          startedAt: new Date().toISOString(),
+          lookupDurationMs: 42,
+          workerIndex: 1,
+          queueLength: options.requests.length,
+          statusCount: 1,
+        });
+      }
       return {
         provider: "auto",
+        workers: options.workers,
         requests: 1,
         cachedRecords: 0,
         statuses: [],
@@ -3009,8 +3071,11 @@ test("dashboard auto sync recovers after an earlier queue-empty skip", async () 
     assert.equal(syncCalls, 1);
     assert.equal(lastSyncOptions.requests.length, 1);
     assert.equal(lastSyncOptions.provider, "api");
+    assert.equal(lastSyncOptions.workers, 3);
     assert.equal(lastSyncOptions.requests[0].statusSource, "applicant");
     assert.equal(lastSyncOptions.requests[0].characterName, "Urmomgargles");
+    assert.equal(secondResult.state.autoSync.workerCount, 3);
+    assert.equal(secondResult.state.autoSync.lastLookupDurationMs, 42);
 
     writeSavedVariables(
       "",

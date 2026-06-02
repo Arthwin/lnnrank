@@ -153,6 +153,51 @@ function formatDelayMs(value) {
   return `${(numeric / 1000).toFixed(numeric >= 10000 ? 0 : 1)} s`;
 }
 
+function formatLookupName(lookup) {
+  if (!lookup) {
+    return null;
+  }
+  const name = lookup.characterName || lookup.name;
+  if (!name) {
+    return null;
+  }
+  return `${name}${lookup.realm ? `-${lookup.realm}` : ""}`;
+}
+
+function formatWorkerCount(sync) {
+  const workerCount = Math.max(1, toNumber(sync && sync.workerCount) || 1);
+  return `${workerCount} worker${workerCount === 1 ? "" : "s"}`;
+}
+
+function formatStatusTiming(status) {
+  if (!status) {
+    return "";
+  }
+
+  if (status.state === "searching" && status.startedAt) {
+    const startedAtMs = Date.parse(status.startedAt);
+    if (Number.isFinite(startedAtMs)) {
+      return `running ${formatDelayMs(Date.now() - startedAtMs)}`;
+    }
+  }
+
+  const parts = [];
+  if (status.lookupDurationMs != null) {
+    parts.push(`lookup ${formatDelayMs(status.lookupDurationMs)}`);
+  }
+  if (status.queueWaitMs != null && status.queueWaitMs >= 1000) {
+    parts.push(`wait ${formatDelayMs(status.queueWaitMs)}`);
+  }
+  if (parts.length === 0 && status.totalDurationMs != null) {
+    parts.push(`total ${formatDelayMs(status.totalDurationMs)}`);
+  }
+  if (status.workerIndex != null) {
+    parts.push(`w${Number(status.workerIndex) + 1}`);
+  }
+
+  return parts.join(" / ");
+}
+
 function toNumber(value) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -702,18 +747,6 @@ function getStatusMap(data) {
 function renderSearchSummary(data) {
   const sync = data.autoSync || {};
   const syncLabel = sync.isRunning ? "Running" : sync.lastError ? "Attention" : "Idle";
-  const workerMeta = sync.isRunning
-    ? [
-        sync.mode || "auto",
-        sync.currentLookup && (sync.currentLookup.characterName || sync.currentLookup.name)
-          ? `${sync.currentLookup.characterName || sync.currentLookup.name}${sync.currentLookup.realm ? `-${sync.currentLookup.realm}` : ""}`
-          : "working",
-      ].join(" · ")
-    : sync.lastError
-      ? `${sync.mode || "auto"} · last run failed`
-      : sync.lastFinishedAt
-        ? `${sync.mode || "auto"} · ${formatShortDate(sync.lastFinishedAt)}`
-        : sync.mode || "auto";
   const target = document.getElementById("searchResultsSummary");
   target.innerHTML = [
     createSearchSummaryChip("Cached", formatCompactNumber(data.meta.recordCount, 0), "is-ok"),
@@ -726,30 +759,39 @@ function renderSearchSummary(data) {
       "Sync",
       syncLabel,
       sync.lastError ? "is-bad" : sync.isRunning ? "is-warn" : "is-ok",
-      { meta: workerMeta }
+      { meta: formatWorkerMeta(sync) }
     ),
   ].join("");
 }
 
 function formatWorkerMeta(sync) {
+  const baseParts = [sync.mode || "auto", formatWorkerCount(sync)];
+
   if (sync.isRunning) {
-    return [
-      sync.mode || "auto",
-      sync.currentLookup && (sync.currentLookup.characterName || sync.currentLookup.name)
-        ? `${sync.currentLookup.characterName || sync.currentLookup.name}${sync.currentLookup.realm ? `-${sync.currentLookup.realm}` : ""}`
-        : "working",
-    ].join(" / ");
+    const activeLookup = formatLookupName(sync.currentLookup) || "working";
+    const workerLabel =
+      sync.currentLookupWorkerIndex == null ? null : `w${Number(sync.currentLookupWorkerIndex) + 1}`;
+    const durationLabel =
+      sync.currentLookupDurationMs == null ? null : `running ${formatDelayMs(sync.currentLookupDurationMs)}`;
+    return [...baseParts, activeLookup, workerLabel, durationLabel].filter(Boolean).join(" / ");
   }
 
   if (sync.lastError) {
-    return `${sync.mode || "auto"} / last run failed`;
+    return [...baseParts, "last run failed"].join(" / ");
   }
 
+  const lastTiming = [];
+  if (sync.lastLookupDurationMs != null) {
+    lastTiming.push(`last lookup ${formatDelayMs(sync.lastLookupDurationMs)}`);
+  }
+  if (sync.lastRunDurationMs != null) {
+    lastTiming.push(`run ${formatDelayMs(sync.lastRunDurationMs)}`);
+  }
   if (sync.lastFinishedAt) {
-    return `${sync.mode || "auto"} / ${formatShortDate(sync.lastFinishedAt)}`;
+    return [...baseParts, ...lastTiming, formatShortDate(sync.lastFinishedAt)].join(" / ");
   }
 
-  return sync.mode || "auto";
+  return [...baseParts, ...lastTiming].join(" / ");
 }
 
 function renderQueueWorker(data) {
@@ -831,6 +873,7 @@ function getSortedResults(data) {
 
 function renderResults(data) {
   const rows = getSortedResults(data);
+  const statusMap = getStatusMap(data);
   const paged = paginateItems(rows, state.resultsPage, RESULTS_PAGE_SIZE);
   state.resultsPage = paged.page;
   persistViewState();
@@ -859,6 +902,8 @@ function renderResults(data) {
       const blendedPercent = getRecordBlendedPercent(record, averageParse);
       const classColor = resolveWowClassColor(record.className);
       const nameStyle = classColor ? ` style="color: ${escapeHtml(classColor)}"` : "";
+      const status = statusMap.get(buildClientCacheKey(record.region, record.realm, record.name));
+      const timingLabel = formatStatusTiming(status);
       const locationParts = [record.realm];
       if (record.region) {
         locationParts.push(`(${String(record.region).toUpperCase()})`);
@@ -883,7 +928,10 @@ function renderResults(data) {
           <td><span class="tone-value ${toneClassForBlendedPerformance(record, averageParse)}">${escapeHtml(formatPercentMetric(blendedPercent))}</span></td>
           <td><span class="tone-value ${toneClassForParsePercent(averageParse)}">${escapeHtml(formatPercentMetric(averageParse))}</span></td>
           <td><span class="tone-value ${toneClassForWclScore(record.score)}">${escapeHtml(formatCompactNumber(record.score))}</span></td>
-          <td>${escapeHtml(formatDate(record.updatedAt))}</td>
+          <td>
+            ${escapeHtml(formatDate(record.updatedAt))}
+            ${timingLabel ? `<div class="results-location-meta">${escapeHtml(timingLabel)}</div>` : ""}
+          </td>
         </tr>
       `;
     })
@@ -897,29 +945,36 @@ function renderQueue(data) {
     return;
   }
 
+  const statusMap = getStatusMap(data);
   target.innerHTML = data.queue
     .map(
-      (entry) => `
-        <article class="list-item">
-          <header>
-            <div>
-              <strong>${escapeHtml(entry.characterName)}</strong>
-              <div class="list-meta">
-                <span>${escapeHtml(entry.realm)}</span>
-                <span>${escapeHtml(entry.region)}</span>
-                <span>${escapeHtml(entry.sources.map(formatSourceLabel).join(" + "))}</span>
-                <span>${escapeHtml(formatDate(entry.requestTimestamp))}</span>
+      (entry) => {
+        const status = statusMap.get(entry.key) || entry.status || null;
+        const stateLabel = status ? status.state : entry.record ? "cached" : "queued";
+        const timingLabel = formatStatusTiming(status);
+        return `
+          <article class="list-item">
+            <header>
+              <div>
+                <strong>${escapeHtml(entry.characterName)}</strong>
+                <div class="list-meta">
+                  <span>${escapeHtml(entry.realm)}</span>
+                  <span>${escapeHtml(entry.region)}</span>
+                  <span>${escapeHtml(entry.sources.map(formatSourceLabel).join(" + "))}</span>
+                  <span>${escapeHtml(formatDate(entry.requestTimestamp))}</span>
+                </div>
               </div>
+              <button class="danger" data-remove-queue="${escapeHtml(entry.key)}">Remove</button>
+            </header>
+            <div class="list-meta">
+              <span class="pill ${statusPill(stateLabel)}">${escapeHtml(stateLabel)}</span>
+              <span>Score: ${entry.record && entry.record.score != null ? escapeHtml(entry.record.score) : "-"}</span>
+              ${timingLabel ? `<span>${escapeHtml(timingLabel)}</span>` : ""}
+              ${entry.seenCount ? `<span>seen ${escapeHtml(entry.seenCount)}x</span>` : ""}
             </div>
-            <button class="danger" data-remove-queue="${escapeHtml(entry.key)}">Remove</button>
-          </header>
-          <div class="list-meta">
-            <span class="pill ${entry.record ? "ok" : "warn"}">${entry.record ? "Cached" : "Lookup needed"}</span>
-            <span>Score: ${entry.record && entry.record.score != null ? escapeHtml(entry.record.score) : "-"}</span>
-            ${entry.seenCount ? `<span>seen ${escapeHtml(entry.seenCount)}x</span>` : ""}
-          </div>
-        </article>
-      `
+          </article>
+        `;
+      }
     )
     .join("");
 }

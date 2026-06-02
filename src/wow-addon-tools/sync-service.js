@@ -40,6 +40,11 @@ const { getPreferredMetricForRole, normalizeRoleValue } = require("../shared/wow
 const { LookupQueue, buildLookupQueueKey, runLookupWorkers } = require("./lookup-queue");
 const { loadSavedVariablesFile } = require("./saved-variables");
 
+const DEFAULT_SYNC_WORKERS = Math.max(
+  1,
+  Number.parseInt(process.env.WCL_SYNC_WORKERS || "1", 10) || 1
+);
+
 function normalizeRoleHint(value) {
   return normalizeRoleValue(value);
 }
@@ -48,7 +53,78 @@ function getExpectedParseMetricForRole(roleValue) {
   return getPreferredMetricForRole(roleValue);
 }
 
-function pushStatus(cache, statusEntries, request, state, message) {
+function resolveSyncWorkerCount(provider, options = {}) {
+  if (provider === "api") {
+    return 1;
+  }
+
+  const rawValue = options.workers == null ? DEFAULT_SYNC_WORKERS : options.workers;
+  return Math.max(1, Number.parseInt(String(rawValue), 10) || 1);
+}
+
+function parseTimestampMs(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 100000000000 ? value : value * 1000;
+  }
+
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsedIso = Date.parse(value);
+    if (Number.isFinite(parsedIso)) {
+      return parsedIso;
+    }
+
+    const parsedNumber = Number(value);
+    if (Number.isFinite(parsedNumber)) {
+      return parsedNumber > 100000000000 ? parsedNumber : parsedNumber * 1000;
+    }
+  }
+
+  return null;
+}
+
+function getRequestQueuedAtMs(request) {
+  return (
+    parseTimestampMs(request.updatedAt) ??
+    parseTimestampMs(request.createdAt) ??
+    parseTimestampMs(request.requestTimestamp) ??
+    parseTimestampMs(request.queuedAt) ??
+    parseTimestampMs(request.lastSeenAt)
+  );
+}
+
+function buildStatusTiming(request, timing = {}) {
+  const queuedAtMs = getRequestQueuedAtMs(request);
+  const startedAtMs = parseTimestampMs(timing.startedAtMs ?? timing.startedAt);
+  const finishedAtMs = parseTimestampMs(timing.finishedAtMs ?? timing.finishedAt);
+  const statusTiming = {};
+
+  if (queuedAtMs != null) {
+    statusTiming.queuedAt = new Date(queuedAtMs).toISOString();
+  }
+  if (startedAtMs != null) {
+    statusTiming.startedAt = new Date(startedAtMs).toISOString();
+  }
+  if (finishedAtMs != null) {
+    statusTiming.finishedAt = new Date(finishedAtMs).toISOString();
+  }
+  if (queuedAtMs != null && startedAtMs != null) {
+    statusTiming.queueWaitMs = Math.max(0, startedAtMs - queuedAtMs);
+  }
+  if (startedAtMs != null && finishedAtMs != null) {
+    statusTiming.lookupDurationMs = Math.max(0, finishedAtMs - startedAtMs);
+  }
+  if (queuedAtMs != null && finishedAtMs != null) {
+    statusTiming.totalDurationMs = Math.max(0, finishedAtMs - queuedAtMs);
+  }
+  if (Number.isFinite(Number(timing.workerIndex))) {
+    statusTiming.workerIndex = Number(timing.workerIndex);
+  }
+
+  return statusTiming;
+}
+
+function pushStatus(cache, statusEntries, request, state, message, timing = {}) {
+  const statusTiming = buildStatusTiming(request, timing);
   const status = {
     region: request.region,
     realm: request.realm,
@@ -56,12 +132,13 @@ function pushStatus(cache, statusEntries, request, state, message) {
     state,
     message,
     source: request.statusSource || request.requestSource || "savedvariables",
-    updatedAt: formatIsoTimestamp(),
+    updatedAt: statusTiming.finishedAt || statusTiming.startedAt || formatIsoTimestamp(),
     force: request.force === true || request.forceRefresh === true,
     retryCount:
       state === "error" || request.force === true || request.forceRefresh === true
         ? Math.max(0, Number.isFinite(Number(request.retryCount)) ? Number(request.retryCount) : 0)
         : null,
+    ...statusTiming,
   };
   statusEntries.push(status);
   upsertRequestStatus(cache, status);
@@ -86,12 +163,7 @@ async function runAddonRequestSync(options = {}) {
   const addonsDir = options.addonsDir
     ? path.resolve(String(options.addonsDir))
     : DEFAULT_WOW_ADDONS_DIR;
-  const workerCount =
-    provider === "api"
-      ? 1
-      : options.workers == null
-        ? 1
-        : Math.max(1, Number.parseInt(String(options.workers), 10) || 1);
+  const workerCount = resolveSyncWorkerCount(provider, options);
   const reuseBrowserSession = options.reuseBrowserSession !== false && workerCount === 1;
 
   const manualRequests = listManualRequests(cache).map((request) => ({
@@ -133,6 +205,7 @@ async function runAddonRequestSync(options = {}) {
   const lookupQueue = new LookupQueue();
   const requestGroups = new Map();
   const queuedLookupByKey = new Map();
+  const lookupTimingsByKey = new Map();
   const providersUsed = new Set();
   const onUpdate = typeof options.onUpdate === "function" ? options.onUpdate : null;
 
@@ -200,7 +273,17 @@ async function runAddonRequestSync(options = {}) {
       freshCached.parseMetric !== expectedParseMetric;
 
     if (freshCached && !needsWebEnrichment && !needsWclMetadataBackfill && !needsRoleMetricBackfill) {
-      pushStatus(cache, statusEntries, request, "cached", "Using cached Warcraft Logs data from the last 24 hours.");
+      const startedAtMs = Date.now();
+      const finishedAtMs = Date.now();
+      const timing = buildStatusTiming(request, { startedAtMs, finishedAtMs });
+      pushStatus(
+        cache,
+        statusEntries,
+        request,
+        "cached",
+        "Using cached Warcraft Logs data from the last 24 hours.",
+        { startedAtMs, finishedAtMs }
+      );
       if (request.requestOrigin === "manual") {
         removeManualRequest(cache, request.key || lookup);
       }
@@ -208,21 +291,40 @@ async function runAddonRequestSync(options = {}) {
         phase: "status",
         state: "cached",
         request,
+        ...timing,
       });
       continue;
     }
 
     if (provider === "off") {
+      const startedAtMs = Date.now();
+      const finishedAtMs = Date.now();
+      const timing = buildStatusTiming(request, { startedAtMs, finishedAtMs });
       const staleRecord = getCachedRecord(cache, lookup);
       if (staleRecord) {
-        pushStatus(cache, statusEntries, request, "stale_cached", "Lookup provider is off. Using stale cached data.");
+        pushStatus(
+          cache,
+          statusEntries,
+          request,
+          "stale_cached",
+          "Lookup provider is off. Using stale cached data.",
+          { startedAtMs, finishedAtMs }
+        );
       } else {
-        pushStatus(cache, statusEntries, request, "disabled", "Lookup provider is off. No live request was made.");
+        pushStatus(
+          cache,
+          statusEntries,
+          request,
+          "disabled",
+          "Lookup provider is off. No live request was made.",
+          { startedAtMs, finishedAtMs }
+        );
       }
       await persistProgress({
         phase: "status",
         state: staleRecord ? "stale_cached" : "disabled",
         request,
+        ...timing,
       });
       continue;
     }
@@ -310,19 +412,43 @@ async function runAddonRequestSync(options = {}) {
         },
       };
     },
-    handleStart: async (entry) => {
-      if (onUpdate) {
-        await onUpdate({
-          phase: "lookup-start",
-          provider,
-          lookup: entry.lookup,
-          queueLength: requests.length,
-          statusCount: statusEntries.length,
-        });
-      }
-    },
-    handleResult: async (entry, result) => {
+    handleStart: async (entry, workerIndex) => {
+      const startedAtMs = Date.now();
       const groupedRequests = requestGroups.get(entry.key) || [];
+      lookupTimingsByKey.set(entry.key, { startedAtMs, workerIndex });
+
+      for (const request of groupedRequests) {
+        pushStatus(
+          cache,
+          statusEntries,
+          request,
+          "searching",
+          `Searching Warcraft Logs with worker ${workerIndex + 1}.`,
+          { startedAtMs, workerIndex }
+        );
+      }
+      await persistProgress({
+        phase: "lookup-start",
+        state: "searching",
+        provider,
+        lookup: entry.lookup,
+        startedAt: new Date(startedAtMs).toISOString(),
+        workerIndex,
+      });
+    },
+    handleResult: async (entry, result, workerIndex) => {
+      const groupedRequests = requestGroups.get(entry.key) || [];
+      const finishedAtMs = Date.now();
+      const startedTiming = lookupTimingsByKey.get(entry.key) || {
+        startedAtMs: finishedAtMs,
+        workerIndex,
+      };
+      const timingInput = {
+        startedAtMs: startedTiming.startedAtMs,
+        finishedAtMs,
+        workerIndex: startedTiming.workerIndex ?? workerIndex,
+      };
+      const updateTiming = buildStatusTiming(groupedRequests[0] || entry.lookup, timingInput);
       rateLimit = result.rateLimit || rateLimit;
       const providerUsed = result.providerUsed || provider;
 
@@ -338,58 +464,123 @@ async function runAddonRequestSync(options = {}) {
               ? "Live Warcraft Logs API data imported."
               : result.fallbackFrom === "api"
                 ? "Warcraft Logs page imported after API fallback."
-                : "Live Warcraft Logs page imported."
+                : "Live Warcraft Logs page imported.",
+            timingInput
           );
           if (request.requestOrigin === "manual") {
             removeManualRequest(cache, request.key || request);
           }
         }
+        lookupTimingsByKey.delete(entry.key);
         await persistProgress({
           phase: "status",
           state: "found",
           lookup: entry.lookup,
+          ...updateTiming,
         });
         return;
       }
 
       for (const request of groupedRequests) {
-        pushStatus(cache, statusEntries, request, "not_found", "No public Warcraft Logs Mythic+ data found.");
+        pushStatus(
+          cache,
+          statusEntries,
+          request,
+          "not_found",
+          "No public Warcraft Logs Mythic+ data found.",
+          timingInput
+        );
         if (request.requestOrigin === "manual") {
           removeManualRequest(cache, request.key || request);
         }
       }
+      lookupTimingsByKey.delete(entry.key);
       await persistProgress({
         phase: "status",
         state: "not_found",
         lookup: entry.lookup,
+        ...updateTiming,
       });
     },
-    handleError: async (entry, error) => {
+    handleError: async (entry, error, workerIndex) => {
       const groupedRequests = requestGroups.get(entry.key) || [];
+      const finishedAtMs = Date.now();
+      const startedTiming = lookupTimingsByKey.get(entry.key) || {
+        startedAtMs: finishedAtMs,
+        workerIndex,
+      };
+      const timingInput = {
+        startedAtMs: startedTiming.startedAtMs,
+        finishedAtMs,
+        workerIndex: startedTiming.workerIndex ?? workerIndex,
+      };
+      const updateTiming = buildStatusTiming(groupedRequests[0] || entry.lookup, timingInput);
       const staleRecord = getCachedRecord(cache, entry.lookup);
       let state = "error";
 
       for (const request of groupedRequests) {
         if (error instanceof ProviderCooldownError) {
           if (staleRecord) {
-            pushStatus(cache, statusEntries, request, "api_cooldown", "Using stale cached data because API lookups are cooling down for 30 minutes.");
+            pushStatus(
+              cache,
+              statusEntries,
+              request,
+              "api_cooldown",
+              "Using stale cached data because API lookups are cooling down for 30 minutes.",
+              timingInput
+            );
           } else {
-            pushStatus(cache, statusEntries, request, "api_cooldown", "API lookups are cooling down for 30 minutes after the last try.");
+            pushStatus(
+              cache,
+              statusEntries,
+              request,
+              "api_cooldown",
+              "API lookups are cooling down for 30 minutes after the last try.",
+              timingInput
+            );
           }
           state = "api_cooldown";
         } else if (error instanceof WclRateLimitError) {
           if (staleRecord) {
-            pushStatus(cache, statusEntries, request, "stale_cached", "Using stale cached data because the Warcraft Logs API is rate limited.");
+            pushStatus(
+              cache,
+              statusEntries,
+              request,
+              "stale_cached",
+              "Using stale cached data because the Warcraft Logs API is rate limited.",
+              timingInput
+            );
             state = "stale_cached";
           } else {
-            pushStatus(cache, statusEntries, request, "rate_limited", "Warcraft Logs API rate limit reached. Try again after the hourly reset.");
+            pushStatus(
+              cache,
+              statusEntries,
+              request,
+              "rate_limited",
+              "Warcraft Logs API rate limit reached. Try again after the hourly reset.",
+              timingInput
+            );
             state = "rate_limited";
           }
         } else if (staleRecord) {
-          pushStatus(cache, statusEntries, request, "stale_cached", "Using stale cached data because the live web lookup failed.");
+          pushStatus(
+            cache,
+            statusEntries,
+            request,
+            "stale_cached",
+            "Using stale cached data because the live web lookup failed.",
+            timingInput
+          );
           state = "stale_cached";
         } else {
-          pushStatus(cache, statusEntries, request, "error", error.message || "Warcraft Logs lookup failed.");
+          pushStatus(
+            cache,
+            statusEntries,
+            request,
+            "error",
+            error.message || "Warcraft Logs lookup failed.",
+            timingInput
+          );
           state = "error";
         }
 
@@ -397,10 +588,12 @@ async function runAddonRequestSync(options = {}) {
           removeManualRequest(cache, request.key || request);
         }
       }
+      lookupTimingsByKey.delete(entry.key);
       await persistProgress({
         phase: "status",
         state,
         lookup: entry.lookup,
+        ...updateTiming,
       });
     },
   });

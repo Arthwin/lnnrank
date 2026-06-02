@@ -66,6 +66,7 @@ npm run wow-addon-dashboard
 npm run build-wow-addon-character -- --region us --realm Stormrage --name Urmomgargles
 npm run build-wow-addon-mock -- --install-wow
 npm run sync-wow-addon-requests -- --install-wow
+npm run stress:search -- 30 2 web
 ```
 
 Dashboard URL:
@@ -136,6 +137,8 @@ What it does not do:
 - `WCL_WEB_BROWSER`: optional browser executable override for web scraping mode
 - `WCL_WEB_DATA_TIMEOUT_MS`: browser wait timeout for page data
 - `WCL_WEB_BROWSER_IDLE_MS`: shared browser reuse window
+- `WCL_SYNC_WORKERS`: default lookup worker count for sync runs, default `1`
+- `WCL_DASHBOARD_SYNC_WORKERS`: dashboard auto-sync lookup workers, default `2`
 - `WCL_DASHBOARD_PORT`: dashboard port, default `47832`
 - `WCL_DASHBOARD_DEV_PORT`: dev dashboard port, default `47842`
 - `WCL_DASHBOARD_DB_PATH`: optional override for the local DB JSON path
@@ -169,6 +172,37 @@ When tuning lookup speed:
 - keep the queue dedupe guarantee for both normal and force-refresh lookups
 - prefer configurable worker counts over hard-coded parallelism
 - keep `/reload` import behavior separate from addon-to-app live request export
+
+Current timing visibility:
+
+- request statuses store `queuedAt`, `startedAt`, `finishedAt`, `queueWaitMs`, `lookupDurationMs`, and `totalDurationMs`
+- the Search view worker strip shows worker count plus current/last lookup duration
+- queue rows and cached result rows show compact timing labels when a matching status exists
+
+Dashboard auto-sync defaults to `2` workers for web/auto lookup runs. API-only sync
+runs are still serialized by the sync service to avoid fighting API cooldown and
+rate-limit behavior. Use `WCL_DASHBOARD_SYNC_WORKERS=1` if you want to compare
+against single-worker behavior.
+
+Manual stress runs:
+
+```powershell
+npm run stress:search -- 30 2 web
+```
+
+This command clones the current local DB into `output/search-stress/<timestamp>`
+and runs force-refresh searches there, so it does not alter the live dashboard DB
+or installed addon payload. Each run writes:
+
+- `stress-report.json`: full lookup, status, update, and summary data
+- `stress-report.csv`: per-character timing rows for quick inspection
+
+Use `--force false` for a cache-path baseline, or `--run-dir <path>` to choose a
+specific output folder. Direct Node invocation also supports named flags:
+
+```powershell
+node src/wow-addon-tools/stress-search.js --count 30 --workers 2 --provider web
+```
 
 ## Container note
 

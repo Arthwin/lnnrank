@@ -52,6 +52,10 @@ const {
 } = require("./addon-event-format");
 
 const DEFAULT_PORT = Number.parseInt(process.env.WCL_DASHBOARD_PORT || "47832", 10);
+const DEFAULT_DASHBOARD_SYNC_WORKERS = Math.max(
+  1,
+  Number.parseInt(process.env.WCL_DASHBOARD_SYNC_WORKERS || process.env.WCL_SYNC_WORKERS || "2", 10) || 2
+);
 const DASHBOARD_ROOT = path.join(__dirname, "dashboard");
 const DASHBOARD_ASSET_PATHS = [
   path.join(DASHBOARD_ROOT, "index.html"),
@@ -156,6 +160,13 @@ const MAX_QUEUE_ERROR_RETRIES = 2;
 function getStatusRetryCount(status) {
   const retryCount = Number(status && status.retryCount);
   return Number.isFinite(retryCount) && retryCount > 0 ? retryCount : 0;
+}
+
+function resolveDashboardSyncWorkerCount(value) {
+  if (value == null) {
+    return DEFAULT_DASHBOARD_SYNC_WORKERS;
+  }
+  return Math.max(1, Number.parseInt(String(value), 10) || DEFAULT_DASHBOARD_SYNC_WORKERS);
 }
 
 function isRetryableQueueErrorStatus(status) {
@@ -850,6 +861,7 @@ async function createDashboardServer(options = {}) {
   const addonsDir = options.addonsDir ? path.resolve(String(options.addonsDir)) : null;
   const provider = options.provider || null;
   const syncRequests = options.runAddonRequestSync || runAddonRequestSync;
+  const syncWorkerCount = resolveDashboardSyncWorkerCount(options.syncWorkers ?? options.workers);
   const backgroundTickMs =
     options.backgroundTickMs == null ? 500 : Number.parseInt(String(options.backgroundTickMs), 10);
   const autoSync = {
@@ -861,8 +873,14 @@ async function createDashboardServer(options = {}) {
     lastResult: null,
     lastUpdate: null,
     currentLookup: null,
+    currentLookupStartedAt: null,
+    currentLookupWorkerIndex: null,
+    lastLookup: null,
+    lastLookupDurationMs: null,
+    lastRunDurationMs: null,
     queueLength: 0,
     statusCount: 0,
+    workerCount: syncWorkerCount,
     mode: "auto",
     scheduled: false,
     timer: null,
@@ -2228,6 +2246,7 @@ async function createDashboardServer(options = {}) {
           ? null
           : {
               provider: autoSync.lastResult.provider,
+              workers: autoSync.lastResult.workers,
               requests: autoSync.lastResult.requests,
               cachedRecords: autoSync.lastResult.cachedRecords,
               statuses: Array.isArray(autoSync.lastResult.statuses)
@@ -2236,8 +2255,18 @@ async function createDashboardServer(options = {}) {
             },
       lastUpdate: autoSync.lastUpdate,
       currentLookup: autoSync.currentLookup,
+      currentLookupStartedAt: autoSync.currentLookupStartedAt,
+      currentLookupDurationMs:
+        autoSync.isRunning && autoSync.currentLookupStartedAt
+          ? Math.max(0, Date.now() - Date.parse(autoSync.currentLookupStartedAt))
+          : null,
+      currentLookupWorkerIndex: autoSync.currentLookupWorkerIndex,
+      lastLookup: autoSync.lastLookup,
+      lastLookupDurationMs: autoSync.lastLookupDurationMs,
+      lastRunDurationMs: autoSync.lastRunDurationMs,
       queueLength: autoSync.queueLength,
       statusCount: autoSync.statusCount,
+      workerCount: autoSync.workerCount,
       mode: autoSync.mode,
     };
   }
@@ -2283,12 +2312,14 @@ async function createDashboardServer(options = {}) {
     }
 
     const currentRun = (async () => {
+      const runStartedAtMs = Date.now();
       try {
         const beforeState = snapshotState();
         if (!force && beforeState.meta.queueCount === 0) {
           autoSync.scheduled = false;
           autoSync.currentLookup = null;
           autoSync.queueLength = 0;
+          autoSync.lastRunDurationMs = Date.now() - runStartedAtMs;
           return {
             skipped: true,
             reason: "queue-empty",
@@ -2299,9 +2330,12 @@ async function createDashboardServer(options = {}) {
         autoSync.lastStartedAt = new Date().toISOString();
         autoSync.lastError = null;
         autoSync.currentLookup = null;
+        autoSync.currentLookupStartedAt = null;
+        autoSync.currentLookupWorkerIndex = null;
         autoSync.lastUpdate = null;
         autoSync.queueLength = beforeState.meta.queueCount;
         autoSync.statusCount = 0;
+        autoSync.workerCount = syncWorkerCount;
 
         const savedVariables = pickLatestSavedVariablesFile(accountRoot);
         const queuedRequests = buildSyncRequestsFromQueue(beforeState.queue);
@@ -2312,7 +2346,7 @@ async function createDashboardServer(options = {}) {
           addonsDir,
           provider,
           requests: queuedRequests,
-          workers: 1,
+          workers: syncWorkerCount,
           installWow: true,
           onUpdate: async (update) => {
             autoSync.lastUpdate = update;
@@ -2327,10 +2361,24 @@ async function createDashboardServer(options = {}) {
             if (Object.prototype.hasOwnProperty.call(update, "statusCount")) {
               autoSync.statusCount = update.statusCount;
             }
+            if (Object.prototype.hasOwnProperty.call(update, "workerIndex")) {
+              autoSync.currentLookupWorkerIndex = update.workerIndex;
+            }
+            if (update.phase === "lookup-start" && update.startedAt) {
+              autoSync.currentLookupStartedAt = update.startedAt;
+            }
+            if (Object.prototype.hasOwnProperty.call(update, "lookupDurationMs")) {
+              autoSync.lastLookupDurationMs = update.lookupDurationMs;
+              autoSync.lastLookup = update.lookup || update.request || autoSync.currentLookup;
+              autoSync.currentLookupStartedAt = null;
+              autoSync.currentLookupWorkerIndex = null;
+            }
           },
         });
         autoSync.lastResult = result;
         autoSync.currentLookup = null;
+        autoSync.currentLookupStartedAt = null;
+        autoSync.currentLookupWorkerIndex = null;
         return result;
       } catch (error) {
         autoSync.lastError = error.message || "Auto sync failed.";
@@ -2338,9 +2386,12 @@ async function createDashboardServer(options = {}) {
       } finally {
         autoSync.isRunning = false;
         autoSync.lastFinishedAt = new Date().toISOString();
+        autoSync.lastRunDurationMs = Date.now() - runStartedAtMs;
 
         const afterState = snapshotState();
         autoSync.currentLookup = null;
+        autoSync.currentLookupStartedAt = null;
+        autoSync.currentLookupWorkerIndex = null;
         autoSync.queueLength = afterState.meta.queueCount;
         if (afterState.meta.queueCount > 0) {
           scheduleAutoSync(2500);
