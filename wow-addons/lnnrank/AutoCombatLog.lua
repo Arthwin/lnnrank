@@ -9,21 +9,72 @@ local frame = CreateFrame("Frame")
 local pendingUpdate = false
 local startedByAddon = false
 
+local function getCurrentInstanceInfo()
+    if type(GetInstanceInfo) == "function" then
+        local ok, name, instanceType, difficultyID, difficultyName, maxPlayers, _dynamicDifficulty, _isDynamic, mapID =
+            pcall(GetInstanceInfo)
+        if ok then
+            return {
+                name = name,
+                instanceType = instanceType,
+                difficultyID = tonumber(difficultyID),
+                difficultyName = difficultyName,
+                maxPlayers = maxPlayers,
+                mapID = mapID,
+                fromInstanceInfo = true,
+            }
+        end
+    end
+
+    if type(IsInInstance) == "function" then
+        local inInstance, instanceType = IsInInstance()
+        if inInstance then
+            return {
+                instanceType = instanceType,
+                fromInstanceInfo = false,
+            }
+        end
+    end
+
+    return nil
+end
+
+local function hasInstanceDifficulty(info)
+    if type(info) ~= "table" then
+        return false
+    end
+
+    if type(info.difficultyID) == "number" and info.difficultyID > 0 then
+        return true
+    end
+
+    local difficultyName = tostring(info.difficultyName or "")
+    return difficultyName ~= "" and difficultyName ~= "None"
+end
+
 local function shouldAutoLogCurrentInstance()
     if type(addon.ShouldAutoCombatLogInstances) == "function" and not addon.ShouldAutoCombatLogInstances() then
         return false
     end
 
-    if type(IsInInstance) ~= "function" then
+    local info = getCurrentInstanceInfo()
+    if type(info) ~= "table" or not info.instanceType then
         return false
     end
 
-    local inInstance, instanceType = IsInInstance()
-    if not inInstance then
-        return false
+    if info.instanceType == "raid" then
+        return true
     end
 
-    return instanceType == "party" or instanceType == "raid" or instanceType == "scenario"
+    if info.instanceType == "party" then
+        return info.fromInstanceInfo == false or hasInstanceDifficulty(info)
+    end
+
+    if info.instanceType == "scenario" then
+        return info.fromInstanceInfo == false or hasInstanceDifficulty(info)
+    end
+
+    return false
 end
 
 local function setCombatLogging(enabled)
@@ -91,6 +142,8 @@ frame:RegisterEvent("CHALLENGE_MODE_COMPLETED")
 frame:SetScript("OnEvent", function(_, event)
     if event == "CHALLENGE_MODE_START" then
         scheduleUpdate(1)
+    elseif event == "ZONE_CHANGED_NEW_AREA" then
+        scheduleUpdate(0)
     elseif event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         scheduleUpdate(4)
     else
