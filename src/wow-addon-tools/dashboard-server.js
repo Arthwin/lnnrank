@@ -2357,6 +2357,48 @@ async function createDashboardServer(options = {}) {
     });
   }
 
+  function collectDashboardEntryKeys(entries) {
+    const keys = new Set();
+    for (const entry of entries || []) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+
+      if (entry.key) {
+        keys.add(entry.key);
+        continue;
+      }
+
+      const realm = entry.realm;
+      const name = entry.characterName || entry.name;
+      if (realm && name) {
+        keys.add(buildCacheKey(entry.region || "us", realm, name));
+      }
+    }
+    return keys;
+  }
+
+  function buildTabScopedState(fullState, tab) {
+    if (!tab || tab === "search") {
+      return fullState;
+    }
+
+    const relevantStatusKeys = collectDashboardEntryKeys([
+      ...(fullState.queue || []),
+      ...(fullState.applicants || []),
+      ...(fullState.groupMembers || []),
+    ]);
+
+    return {
+      ...fullState,
+      records: [],
+      requestStatuses: (fullState.requestStatuses || []).filter((status) => {
+        const key = status && (status.key || buildCacheKey(status.region || "us", status.realm, status.name || status.characterName));
+        return key && relevantStatusKeys.has(key);
+      }),
+    };
+  }
+
   function scheduleAutoSync(delayMs = 750) {
     if (autoSync.timer) {
       return;
@@ -2492,7 +2534,7 @@ async function createDashboardServer(options = {}) {
         if (!passiveLiveFeedStateOverride && passiveLiveFeedMonitor && state.passiveBridge) {
           void passiveLiveFeedMonitor.refresh(state.passiveBridge);
         }
-        jsonResponse(response, 200, state);
+        jsonResponse(response, 200, buildTabScopedState(state, requestUrl.searchParams.get("tab")));
         return;
       }
 

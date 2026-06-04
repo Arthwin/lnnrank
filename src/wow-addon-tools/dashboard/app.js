@@ -74,6 +74,7 @@ const state = {
   activeTab: "lfg",
   data: null,
   dashboardVersion: null,
+  loadStatePromise: null,
   resultSearch: "",
   resultsPage: 1,
   resultSort: "updatedAt",
@@ -1630,26 +1631,44 @@ function renderAll() {
     return;
   }
 
-  renderQueueWorker(state.data);
-  renderResults(state.data);
-  renderQueue(state.data);
-  renderPassive(state.data);
-  renderReaderDashboard(state.data);
-  renderRosterList("applicantList", state.data.applicants, "No live LFG applicants right now.", state.data);
+  if (state.activeTab === "search") {
+    renderQueueWorker(state.data);
+    renderResults(state.data);
+    renderQueue(state.data);
+  } else if (state.activeTab === "live") {
+    renderPassive(state.data);
+  } else if (state.activeTab === "reader") {
+    renderReaderDashboard(state.data);
+  } else {
+    renderRosterList("applicantList", state.data.applicants, "No live LFG applicants right now.", state.data);
+  }
+
   applyActiveTab();
 }
 
 async function loadState() {
-  const response = await fetch("/api/state", { cache: "no-store" });
-  const nextData = await response.json();
-  const nextVersion = nextData && nextData.meta ? nextData.meta.dashboardVersion || null : null;
-  if (state.dashboardVersion && nextVersion && state.dashboardVersion !== nextVersion) {
-    window.location.reload();
-    return;
+  if (state.loadStatePromise) {
+    return state.loadStatePromise;
   }
-  state.dashboardVersion = nextVersion || state.dashboardVersion || null;
-  state.data = nextData;
-  renderAll();
+
+  state.loadStatePromise = (async () => {
+    const response = await fetch(`/api/state?tab=${encodeURIComponent(state.activeTab)}`, { cache: "no-store" });
+    const nextData = await response.json();
+    const nextVersion = nextData && nextData.meta ? nextData.meta.dashboardVersion || null : null;
+    if (state.dashboardVersion && nextVersion && state.dashboardVersion !== nextVersion) {
+      window.location.reload();
+      return;
+    }
+    state.dashboardVersion = nextVersion || state.dashboardVersion || null;
+    state.data = nextData;
+    renderAll();
+  })();
+
+  try {
+    return await state.loadStatePromise;
+  } finally {
+    state.loadStatePromise = null;
+  }
 }
 
 async function removeQueue(key) {
@@ -1870,7 +1889,7 @@ function bindTabs() {
 
     state.activeTab = tab.dataset.tab;
     persistViewState();
-    applyActiveTab();
+    renderAll();
   });
 }
 
