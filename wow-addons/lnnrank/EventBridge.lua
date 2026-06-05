@@ -117,8 +117,8 @@ local function buildSearchEvent(lookup)
     return event
 end
 
-local function buildLfgStatusEvent(region, heartbeatId, batchIndex, batchTotal, member)
-    local event = buildBaseEvent("lfg_status", "lfg-status", region)
+local function buildRosterStatusEvent(eventType, source, region, heartbeatId, batchIndex, batchTotal, member)
+    local event = buildBaseEvent(eventType, source, region)
     event.heartbeatId = heartbeatId
     event.batchIndex = batchIndex
     event.batchTotal = batchTotal
@@ -138,17 +138,32 @@ local function buildLfgStatusEvent(region, heartbeatId, batchIndex, batchTotal, 
     return event
 end
 
+local function buildLfgStatusEvent(region, heartbeatId, batchIndex, batchTotal, member)
+    return buildRosterStatusEvent("lfg_status", "lfg-status", region, heartbeatId, batchIndex, batchTotal, member)
+end
+
+local function buildGroupStatusEvent(region, heartbeatId, batchIndex, batchTotal, member)
+    return buildRosterStatusEvent("group_status", "group-status", region, heartbeatId, batchIndex, batchTotal, member)
+end
+
 local function buildHeartbeatMemberToken(member)
     if type(member) ~= "table" or not member.characterName or not member.realm then
         return nil
     end
 
-    return table.concat({
+    local parts = {
         sanitizeSegment(member.characterName, 32),
         sanitizeSegment(member.realm, 32),
         "g" .. sanitizeSegment(member.groupID or 0, 10),
         sanitizeSegment(member.memberIndex or 0, 3),
-    }, "~")
+    }
+
+    if member.class ~= nil or member.assignedRole ~= nil then
+        table.insert(parts, sanitizeSegment(member.class or "UNKNOWN", 16))
+        table.insert(parts, sanitizeSegment(member.assignedRole or "NONE", 16))
+    end
+
+    return table.concat(parts, "~")
 end
 
 local function cloneArray(values)
@@ -164,7 +179,7 @@ local function cloneArray(values)
     return result
 end
 
-local function estimateLfgStatusPayloadLength(region, heartbeatId, batchIndex, batchTotal, members)
+local function estimateRosterStatusPayloadLength(eventType, source, region, heartbeatId, batchIndex, batchTotal, members)
     local bridge = getEventBridgeTable()
     local sequence = (type(bridge.sequence) == "number" and bridge.sequence or 0) + 1
     local sessionId = sanitizeSegment(getSessionId(), 20)
@@ -186,14 +201,14 @@ local function estimateLfgStatusPayloadLength(region, heartbeatId, batchIndex, b
     end
 
     addSegment("v", "2")
-    addSegment("e", "lfg_status")
+    addSegment("e", eventType)
     addSegment("id", eventId)
     addSegment("ch", channelName)
     addSegment("ss", sessionId)
     addSegment("n", sequenceText)
     addSegment("t", timestampText)
     addSegment("rg", regionText)
-    addSegment("sr", "lfg-status")
+    addSegment("sr", source)
     addSegment("hb", heartbeatText)
     addSegment("ix", batchIndexText)
     addSegment("tt", batchTotalText)
@@ -234,7 +249,7 @@ local function encodeEventPayload(event)
     if event.eventType == "search" then
         table.insert(segments, "re=" .. sanitizeSegment(event.realm, 32))
         table.insert(segments, "nm=" .. sanitizeSegment(event.characterName, 32))
-    elseif event.eventType == "lfg_status" then
+    elseif event.eventType == "lfg_status" or event.eventType == "group_status" then
         table.insert(segments, "hb=" .. sanitizeSegment(event.heartbeatId, 24))
         table.insert(segments, "ix=" .. tostring(event.batchIndex or 0))
         table.insert(segments, "tt=" .. tostring(event.batchTotal or 0))
@@ -296,13 +311,21 @@ local function pruneEventBatch(bridge)
     end
 end
 
-local function clearSavedLfgStatusEvents()
+local function clearSavedStatusEvents(eventType)
     local bridge = getEventBridgeTable()
     for key, value in pairs(bridge.events) do
-        if type(value) == "table" and value.eventType == "lfg_status" then
+        if type(value) == "table" and value.eventType == eventType then
             bridge.events[key] = nil
         end
     end
+end
+
+local function clearSavedLfgStatusEvents()
+    clearSavedStatusEvents("lfg_status")
+end
+
+local function clearSavedGroupStatusEvents()
+    clearSavedStatusEvents("group_status")
 end
 
 local function appendSavedBatchEvent(event, payload)
@@ -511,7 +534,8 @@ function addon.PublishLfgStatusSnapshot(region, members)
     for index = 1, #memberEntries do
         local candidateChunk = cloneArray(currentChunk)
         table.insert(candidateChunk, memberEntries[index])
-        local candidatePayloadLength = estimateLfgStatusPayloadLength(region, heartbeatId, 1, 1, candidateChunk)
+        local candidatePayloadLength =
+            estimateRosterStatusPayloadLength("lfg_status", "lfg-status", region, heartbeatId, 1, 1, candidateChunk)
         if candidatePayloadLength > MAX_PASSIVE_PAYLOAD_LENGTH and #currentChunk > 0 then
             table.insert(chunks, currentChunk)
             currentChunk = {memberEntries[index]}
@@ -526,6 +550,54 @@ function addon.PublishLfgStatusSnapshot(region, members)
 
     for index = 1, #chunks do
         publishEvent(buildLfgStatusEvent(region, heartbeatId, index, #chunks, chunks[index]))
+    end
+
+    return true
+end
+
+function addon.PublishGroupStatusSnapshot(region, members)
+    if addon.IsSuppressedInCurrentInstance() then
+        appendLiveRelayDiagnostic("Group relay skipped: instance-suppressed.", {
+            eventType = "group_status",
+            source = "group-status",
+            region = region,
+            deliveryStatus = "instance-suppressed",
+        })
+        return false
+    end
+
+    local memberEntries = type(members) == "table" and members or {}
+    local heartbeatId = tostring(getNowUnixMs())
+
+    if addon.IsSavedEventBatchEnabled() then
+        clearSavedGroupStatusEvents()
+    end
+
+    if #memberEntries <= 0 then
+        return publishEvent(buildGroupStatusEvent(region, heartbeatId, 0, 0, nil))
+    end
+
+    local chunks = {}
+    local currentChunk = {}
+    for index = 1, #memberEntries do
+        local candidateChunk = cloneArray(currentChunk)
+        table.insert(candidateChunk, memberEntries[index])
+        local candidatePayloadLength =
+            estimateRosterStatusPayloadLength("group_status", "group-status", region, heartbeatId, 1, 1, candidateChunk)
+        if candidatePayloadLength > MAX_PASSIVE_PAYLOAD_LENGTH and #currentChunk > 0 then
+            table.insert(chunks, currentChunk)
+            currentChunk = {memberEntries[index]}
+        else
+            currentChunk = candidateChunk
+        end
+    end
+
+    if #currentChunk > 0 then
+        table.insert(chunks, currentChunk)
+    end
+
+    for index = 1, #chunks do
+        publishEvent(buildGroupStatusEvent(region, heartbeatId, index, #chunks, chunks[index]))
     end
 
     return true

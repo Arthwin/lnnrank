@@ -1045,6 +1045,32 @@ test("addon event parser understands grouped LFG heartbeat member tokens", () =>
   });
 });
 
+test("addon event parser understands grouped party and raid roster tokens", () => {
+  const event = parseAddonEventPayload(
+    "LNNRANK|v=2|e=group_status|id=grp-1|ch=lnnrank0ff24cf4|ss=f24cf44941|n=813|t=1780336001123|rg=us|sr=group-status|hb=1780336001123|ix=1|tt=1|m=Tankone~Stormrage~g1~0~WARRIOR~TANK,Dpsone~Area52~g1~1~MAGE~DAMAGER"
+  );
+
+  assert.equal(event.eventType, "group_status");
+  assert.equal(event.source, "group-status");
+  assert.equal(event.members.length, 2);
+  assert.deepEqual(event.members[0], {
+    characterName: "Tankone",
+    realm: "Stormrage",
+    groupID: 1,
+    memberIndex: 0,
+    class: "WARRIOR",
+    assignedRole: "TANK",
+  });
+  assert.deepEqual(event.members[1], {
+    characterName: "Dpsone",
+    realm: "Area52",
+    groupID: 1,
+    memberIndex: 1,
+    class: "MAGE",
+    assignedRole: "DAMAGER",
+  });
+});
+
 test("addon event parser normalizes escaped chat transport payloads", () => {
   const payload =
     "LNNRANK||v=2||e=search||id=s4||ch=lnnrank0ff24cf4||ss=f24cf44941||n=104||t=1780336000004||rg=us||sr=applicant||re=Thrall||nm=Escapedtwo||gi=2||mi=1";
@@ -1645,6 +1671,121 @@ test("dashboard server snapshot applies live applicants from the newest passive 
     assert.equal(state.applicants.length, 1);
     assert.equal(state.applicants[0].characterName, "Freshone");
     assert.equal(state.applicants[0].applicantID, 22);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("dashboard server applies and clears live group roster snapshots", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-live-group-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["groupMembers"] = {',
+      '    ["us:stormrage:oldgroup"] = {',
+      '      ["region"] = "us",',
+      '      ["realm"] = "Stormrage",',
+      '      ["characterName"] = "Oldgroup",',
+      '      ["source"] = "group",',
+      "    },",
+      "  },",
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf49999",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  let passiveLiveFeedState = {
+    supported: true,
+    status: "ready",
+    entries: [
+      {
+        key: "payload:group-live",
+        kind: "payload",
+        preview:
+          "LNNRANK|v=2|e=group_status|id=grp-1|ch=lnnrank0ff24cf4|ss=f24cf49999|n=500|t=1780337000000|rg=us|sr=group-status|hb=1780337000000|ix=1|tt=1|m=Tankone~Stormrage~g1~0~WARRIOR~TANK,Dpsone~Area52~g1~1~MAGE~DAMAGER",
+        firstSeenAt: "2026-06-01T00:16:40.000Z",
+        lastSeenAt: "2026-06-01T00:16:40.000Z",
+      },
+    ],
+  };
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
+    passiveLiveFeedStateOverride: () => passiveLiveFeedState,
+    testHooks,
+  });
+
+  try {
+    const firstSnapshot = testHooks.snapshotState();
+    assert.deepEqual(
+      firstSnapshot.groupMembers.map((entry) => `${entry.characterName}-${entry.realm}:${entry.class}:${entry.assignedRole}`),
+      ["Tankone-Stormrage:WARRIOR:TANK", "Dpsone-Area52:MAGE:DAMAGER"]
+    );
+    assert.deepEqual(
+      firstSnapshot.queue.map((entry) => `${entry.characterName}-${entry.realm}:${entry.sources.join("+")}`).sort(),
+      ["Dpsone-Area52:group", "Tankone-Stormrage:group"]
+    );
+
+    passiveLiveFeedState = {
+      supported: true,
+      status: "ready",
+      entries: [
+        {
+          key: "payload:group-clear",
+          kind: "payload",
+          preview:
+            "LNNRANK|v=2|e=group_status|id=grp-clear|ch=lnnrank0ff24cf4|ss=f24cf49999|n=501|t=1780337005000|rg=us|sr=group-status|hb=1780337005000|ix=0|tt=0",
+          firstSeenAt: "2026-06-01T00:16:45.000Z",
+          lastSeenAt: "2026-06-01T00:16:45.000Z",
+        },
+      ],
+    };
+
+    const clearedSnapshot = testHooks.snapshotState();
+    assert.equal(clearedSnapshot.groupMembers.length, 0);
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

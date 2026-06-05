@@ -1,4 +1,4 @@
-const TAB_IDS = new Set(["search", "lfg", "live", "reader"]);
+const TAB_IDS = new Set(["search", "lfg", "group", "live", "reader"]);
 const VIEW_STATE_STORAGE_KEY = "lnnrank-dashboard-view";
 const RESULTS_PAGE_SIZE = 20;
 const LIVE_LOG_PAGE_SIZE = 12;
@@ -9,6 +9,8 @@ const SOURCE_LABELS = {
   "chat-link": "Ctrl-click chat link",
   chatlink: "Ctrl-click chat link",
   applicant: "LFG applicant",
+  group: "Current group",
+  "group-status": "Group roster",
   self: "Daily self refresh",
   "passive-live": "Passive live feed",
   savedvariables: "WoW request",
@@ -508,7 +510,7 @@ function normalizeRealmKey(value) {
 
 function normalizeRoleValue(value) {
   const normalized = String(value || "").trim().toLocaleLowerCase("en-US");
-  if (!normalized) {
+  if (!normalized || normalized === "none") {
     return null;
   }
   if (normalized === "healer" || normalized === "heal" || normalized === "heals") {
@@ -1511,6 +1513,7 @@ function groupApplicants(entries) {
       entry.groupID ||
       entry.groupId ||
       entry.applicantID ||
+      (entry.source === "group" ? "group" : null) ||
       `solo:${entry.key || buildClientCacheKey(entry.region, entry.realm, entry.characterName)}`;
     if (!groups.has(groupID)) {
       groups.set(groupID, {
@@ -1635,6 +1638,8 @@ function renderAll() {
     renderQueueWorker(state.data);
     renderResults(state.data);
     renderQueue(state.data);
+  } else if (state.activeTab === "group") {
+    renderRosterList("groupMemberList", state.data.groupMembers, "No party or raid members detected right now.", state.data);
   } else if (state.activeTab === "live") {
     renderPassive(state.data);
   } else if (state.activeTab === "reader") {

@@ -8,6 +8,7 @@ local scanFrame = CreateFrame("Frame")
 local scanScheduled = false
 local APPLICANT_POLL_SECONDS = 1
 local lastApplicantRelayStateKey = nil
+local lastGroupRelayStateKey = nil
 local refreshApplicantFrameBindings
 local ACTIVE_APPLICANT_STATUSES = {
     applied = true,
@@ -37,6 +38,10 @@ end
 
 local function resetApplicantRelayState()
     lastApplicantRelayStateKey = nil
+end
+
+local function resetGroupRelayState()
+    lastGroupRelayStateKey = nil
 end
 
 local function buildApplicantRelayMemberToken(member)
@@ -72,6 +77,52 @@ local function buildApplicantRelayStateKey(region, members)
         tostring(#tokens),
         #tokens > 0 and table.concat(tokens, "|") or "empty",
     }, "::")
+end
+
+local function buildGroupRelayStateKey(region, members)
+    local tokens = {}
+    if type(members) == "table" then
+        for index = 1, #members do
+            local member = members[index]
+            if type(member) == "table" and member.characterName and member.realm then
+                table.insert(tokens, table.concat({
+                    tostring(member.groupID or 0),
+                    tostring(member.memberIndex or 0),
+                    tostring(member.characterName),
+                    tostring(member.realm),
+                    tostring(member.class or ""),
+                    tostring(member.assignedRole or ""),
+                    tostring(member.unitToken or ""),
+                }, "~"))
+            end
+        end
+    end
+
+    table.sort(tokens)
+
+    return table.concat({
+        tostring(region or "us"),
+        tostring(#tokens),
+        #tokens > 0 and table.concat(tokens, "|") or "empty",
+    }, "::")
+end
+
+local function maybePublishGroupRelaySnapshot(region, members)
+    if type(addon.PublishGroupStatusSnapshot) ~= "function" then
+        return
+    end
+
+    local stateKey = buildGroupRelayStateKey(region, members)
+    if stateKey == lastGroupRelayStateKey then
+        return
+    end
+
+    if addon.PublishGroupStatusSnapshot(region, members) then
+        lastGroupRelayStateKey = stateKey
+        return
+    end
+
+    resetGroupRelayState()
 end
 
 local function normalizeApplicantStatusValue(value)
@@ -548,14 +599,17 @@ end
 local function collectGroupMembers()
     local region = addon.GetCurrentRegionSlug()
     local entries = {}
+    local relayMembers = {}
 
     if (type(addon.IsSuppressedInCurrentInstance) == "function" and addon.IsSuppressedInCurrentInstance()) or
         not addon.ShouldScanGroupMembers() then
+        resetGroupRelayState()
+        addon.PruneQueuedRequestsBySource("group", {})
         addon.ReplaceSnapshotBucket("groupMembers", entries)
         return
     end
 
-    local function captureUnit(unitToken, source)
+    local function captureUnit(unitToken, memberIndex, groupID)
         if not UnitExists(unitToken) or not UnitIsPlayer(unitToken) then
             return
         end
@@ -565,28 +619,63 @@ local function collectGroupMembers()
             return
         end
 
+        local localizedClass, class = nil, nil
+        if type(UnitClass) == "function" then
+            localizedClass, class = UnitClass(unitToken)
+        end
+
+        local level = type(UnitLevel) == "function" and UnitLevel(unitToken) or nil
+        local assignedRole = type(UnitGroupRolesAssigned) == "function" and UnitGroupRolesAssigned(unitToken) or nil
+        if assignedRole == "NONE" then
+            assignedRole = nil
+        end
+
+        local itemLevel = nil
+        if unitToken == "player" and type(GetAverageItemLevel) == "function" then
+            local equippedItemLevel = select(2, GetAverageItemLevel())
+            itemLevel = tonumber(equippedItemLevel)
+        end
+
         local requestKey = addon.BuildRequestKey(region, realm, name)
-        entries[requestKey] = {
+        local lookup = {
             region = region,
             realm = realm,
             characterName = name,
-            source = source,
+            source = "group",
             unitToken = unitToken,
+            groupID = groupID,
+            memberIndex = memberIndex,
+            class = class,
+            localizedClass = localizedClass,
+            level = level,
+            itemLevel = itemLevel,
+            assignedRole = assignedRole,
             lastSeenAt = time(),
         }
+        entries[requestKey] = lookup
+        table.insert(relayMembers, lookup)
+
+        if addon.ShouldAutoQueueLookup(region, realm, name) then
+            local request = queueLookup(region, realm, name, "group", lookup)
+            if request and type(addon.PublishSearchEvent) == "function" then
+                addon.PublishSearchEvent(request)
+            end
+        end
     end
 
     if IsInRaid() then
         for index = 1, GetNumGroupMembers() do
-            captureUnit("raid" .. index, "raid")
+            captureUnit("raid" .. index, index, 1)
         end
     elseif IsInGroup() then
-        captureUnit("player", "party")
+        captureUnit("player", 0, 1)
         for index = 1, math.max(0, GetNumGroupMembers() - 1) do
-            captureUnit("party" .. index, "party")
+            captureUnit("party" .. index, index, 1)
         end
     end
 
+    maybePublishGroupRelaySnapshot(region, relayMembers)
+    addon.PruneQueuedRequestsBySource("group", entries)
     addon.ReplaceSnapshotBucket("groupMembers", entries)
 end
 

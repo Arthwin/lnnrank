@@ -743,8 +743,12 @@ function buildDashboardState(options = {}) {
     : shouldPreferLiveApplicants(passiveBridge, options.passiveLiveFeedState)
       ? liveApplicants
       : mergeCharacterEntries(savedVariables.parsed.applicants, liveApplicants);
+  const groupMembers = Array.isArray(options.groupMembersOverride)
+    ? options.groupMembersOverride
+    : savedVariables.parsed.groupMembers || [];
   const classHintLookup = buildClassHintLookup([
     ...queue,
+    ...groupMembers,
     ...applicants,
     ...(Array.isArray(options.classHintsOverride) ? options.classHintsOverride : []),
   ]);
@@ -770,7 +774,7 @@ function buildDashboardState(options = {}) {
     })),
     requestStatuses: listRequestStatuses(cache),
     queue,
-    groupMembers: enrichCharacters(savedVariables.parsed.groupMembers, cache, classHintLookup),
+    groupMembers: enrichCharacters(groupMembers, cache, classHintLookup),
     applicants: enrichCharacters(applicants, cache, classHintLookup),
     passiveBridge,
     passiveLiveFeed: options.passiveLiveFeedState || null,
@@ -922,6 +926,12 @@ async function createDashboardServer(options = {}) {
     passiveSessionKey: null,
     latestLiveEventAtMs: 0,
     ignoreBeforeMs: 0,
+  };
+  const groupRuntime = {
+    entries: new Map(),
+    publishers: new Map(),
+    passiveSessionKey: null,
+    latestLiveEventAtMs: 0,
   };
 
   if ((effectiveProvider === "auto" || effectiveProvider === "api") && hasApiCredentials()) {
@@ -1611,6 +1621,38 @@ async function createDashboardServer(options = {}) {
     });
   }
 
+  function upsertSearchRuntimeEntryFromGroupMember(event, member) {
+    if (!event || !member || !member.characterName || !member.realm) {
+      return;
+    }
+
+    upsertSearchRuntimeEntry({
+      eventType: "search",
+      eventId: `${event.eventId || event.heartbeatId || event.capturedAtMs}:group:${member.realm}:${
+        member.characterName
+      }:${member.memberIndex || 0}`,
+      region: event.region || "us",
+      realm: member.realm,
+      characterName: member.characterName,
+      source: "group",
+      publisher: event.publisher || "group-status",
+      sequence: event.sequence || null,
+      capturedAtMs: Number(event.capturedAtMs || 0),
+      capturedAt: event.capturedAt || null,
+      updatedAt: event.updatedAt || event.capturedAt || null,
+      payload: event.payload || null,
+      channelName: event.channelName || null,
+      sessionId: event.sessionId || null,
+      publisherKey: event.publisherKey || event.channelName || event.sessionId || null,
+      groupID: member.groupID != null ? member.groupID : event.groupID != null ? event.groupID : 1,
+      memberIndex: member.memberIndex != null ? member.memberIndex : event.memberIndex || null,
+      assignedRole: member.assignedRole || event.assignedRole || null,
+      class: member.class || event.class || null,
+      itemLevel: member.itemLevel != null ? member.itemLevel : event.itemLevel != null ? event.itemLevel : null,
+      level: member.level != null ? member.level : event.level != null ? event.level : null,
+    });
+  }
+
   function getResolvedQueueStatus(cache, queueEntry) {
     const statuses = new Map(
       listRequestStatuses(cache).map((status) => [
@@ -1848,6 +1890,168 @@ async function createDashboardServer(options = {}) {
     }
   }
 
+  function resetGroupRuntimeState() {
+    groupRuntime.entries.clear();
+    if (groupRuntime.publishers && typeof groupRuntime.publishers.clear === "function") {
+      groupRuntime.publishers.clear();
+    }
+  }
+
+  function getGroupPublisherState(publisherKey) {
+    const key = publisherKey || "default";
+    if (!groupRuntime.publishers.has(key)) {
+      groupRuntime.publishers.set(key, {
+        activeMembers: new Map(),
+        pendingHeartbeats: new Map(),
+        latestAppliedAtMs: 0,
+        transport: null,
+      });
+    }
+    return groupRuntime.publishers.get(key);
+  }
+
+  function normalizeGroupRuntimeEntry(entry, origin) {
+    if (!entry || !entry.region || !entry.realm || !(entry.characterName || entry.name)) {
+      return null;
+    }
+
+    const characterName = entry.characterName || entry.name;
+    const key = buildCacheKey(entry.region, entry.realm, characterName);
+    const lookupHint = passiveQueueRuntime.entries.get(key) || null;
+    return {
+      ...entry,
+      key,
+      characterName,
+      source: "group",
+      requestOrigin: origin || entry.requestOrigin || "group-status",
+      class: entry.class || (lookupHint && lookupHint.class) || null,
+      assignedRole: entry.assignedRole || (lookupHint && lookupHint.assignedRole) || null,
+      itemLevel: entry.itemLevel != null ? entry.itemLevel : lookupHint && lookupHint.itemLevel != null ? lookupHint.itemLevel : null,
+      level: entry.level != null ? entry.level : lookupHint && lookupHint.level != null ? lookupHint.level : null,
+    };
+  }
+
+  function rebuildGroupRuntimeEntries() {
+    groupRuntime.entries.clear();
+    for (const [publisherKey, publisherState] of groupRuntime.publishers.entries()) {
+      for (const member of publisherState.activeMembers.values()) {
+        const normalized = normalizeGroupRuntimeEntry(
+          {
+            ...member,
+            source: "group",
+            requestOrigin: "group-status",
+            publisherKey,
+          },
+          "group-status"
+        );
+        if (!normalized) {
+          continue;
+        }
+        groupRuntime.entries.set(normalized.key, normalized);
+      }
+    }
+  }
+
+  function applyGroupHeartbeatBatch(publisherKey, heartbeatId) {
+    const publisherState = getGroupPublisherState(publisherKey);
+    const batch = publisherState.pendingHeartbeats.get(heartbeatId);
+    if (!batch) {
+      return;
+    }
+
+    if (Number(batch.capturedAtMs || 0) < Number(publisherState.latestAppliedAtMs || 0)) {
+      publisherState.pendingHeartbeats.delete(heartbeatId);
+      return;
+    }
+
+    publisherState.activeMembers = new Map(batch.members.entries());
+    publisherState.latestAppliedAtMs = Number(batch.capturedAtMs || 0);
+    publisherState.transport = batch.transport || publisherState.transport || null;
+    publisherState.pendingHeartbeats.clear();
+    groupRuntime.latestLiveEventAtMs = Math.max(groupRuntime.latestLiveEventAtMs, publisherState.latestAppliedAtMs);
+    rebuildGroupRuntimeEntries();
+  }
+
+  function processGroupStatusEvent(event) {
+    if (!event || event.eventType !== "group_status") {
+      return;
+    }
+
+    const publisherKey = event.publisherKey || event.channelName || event.publisher || "default";
+    const publisherState = getGroupPublisherState(publisherKey);
+    const eventCapturedAtMs = Number(event.capturedAtMs || 0);
+    if (eventCapturedAtMs < Number(publisherState.latestAppliedAtMs || 0)) {
+      return;
+    }
+
+    const batchTotal = Number(event.batchTotal || 0);
+    if (batchTotal <= 0) {
+      publisherState.activeMembers.clear();
+      publisherState.pendingHeartbeats.clear();
+      publisherState.latestAppliedAtMs = eventCapturedAtMs;
+      publisherState.transport = event.publisher || publisherState.transport || null;
+      groupRuntime.latestLiveEventAtMs = Math.max(groupRuntime.latestLiveEventAtMs, eventCapturedAtMs);
+      rebuildGroupRuntimeEntries();
+      return;
+    }
+
+    const heartbeatId = event.heartbeatId || event.eventId || `${publisherKey}:${eventCapturedAtMs}`;
+    const batch = publisherState.pendingHeartbeats.get(heartbeatId) || {
+      capturedAtMs: eventCapturedAtMs,
+      totalParts: batchTotal,
+      parts: new Set(),
+      members: new Map(),
+      transport: event.publisher || null,
+    };
+    batch.capturedAtMs = Math.max(Number(batch.capturedAtMs || 0), eventCapturedAtMs);
+    batch.totalParts = Math.max(Number(batch.totalParts || 0), batchTotal);
+    batch.parts.add(Number(event.batchIndex || 0));
+
+    if (Array.isArray(event.members)) {
+      for (const member of event.members) {
+        if (!member || !member.characterName || !member.realm) {
+          continue;
+        }
+        upsertSearchRuntimeEntryFromGroupMember(event, member);
+        const normalizedMember = {
+          region: event.region || "us",
+          realm: member.realm,
+          characterName: member.characterName,
+          groupID: member.groupID != null ? member.groupID : event.groupID != null ? event.groupID : 1,
+          memberIndex: member.memberIndex != null ? member.memberIndex : event.memberIndex || null,
+          class: member.class || event.class || null,
+          assignedRole: member.assignedRole || event.assignedRole || null,
+          itemLevel: event.itemLevel != null ? event.itemLevel : null,
+          level: event.level != null ? event.level : null,
+          lastSeenAt: eventCapturedAtMs > 0 ? Math.floor(eventCapturedAtMs / 1000) : null,
+          updatedAt: eventCapturedAtMs > 0 ? new Date(eventCapturedAtMs).toISOString() : event.capturedAt,
+          eventAtMs: eventCapturedAtMs,
+          sequence: event.sequence || null,
+          channelName: event.channelName || null,
+          sessionId: event.sessionId || null,
+        };
+        const memberKey = buildCacheKey(normalizedMember.region, normalizedMember.realm, normalizedMember.characterName);
+        batch.members.set(memberKey, normalizedMember);
+      }
+    }
+
+    publisherState.pendingHeartbeats.set(heartbeatId, batch);
+    if (batch.parts.size >= batch.totalParts) {
+      applyGroupHeartbeatBatch(publisherKey, heartbeatId);
+    }
+  }
+
+  function listGroupRuntimeEntries() {
+    return [...groupRuntime.entries.values()].sort((left, right) => {
+      const leftIndex = Number.isFinite(Number(left.memberIndex)) ? Number(left.memberIndex) : Number.MAX_SAFE_INTEGER;
+      const rightIndex = Number.isFinite(Number(right.memberIndex)) ? Number(right.memberIndex) : Number.MAX_SAFE_INTEGER;
+      if (leftIndex !== rightIndex) {
+        return leftIndex - rightIndex;
+      }
+      return String(left.characterName || "").localeCompare(String(right.characterName || ""), "en-US");
+    });
+  }
+
   function isLegacyApplicantSearchEvent(event) {
     return (
       event &&
@@ -1921,6 +2125,27 @@ async function createDashboardServer(options = {}) {
 
       if (isLegacyApplicantSearchEvent(event)) {
         processLegacyApplicantLfgEvent(event);
+      }
+    }
+  }
+
+  function rebuildLiveGroupRuntimeFromCurrentEvents(events, passiveSessionId = null) {
+    if (!Array.isArray(events) || events.length <= 0) {
+      if (passiveSessionId != null) {
+        resetGroupRuntimeState();
+        groupRuntime.passiveSessionKey = passiveSessionId;
+      }
+      return;
+    }
+
+    resetGroupRuntimeState();
+    if (passiveSessionId != null) {
+      groupRuntime.passiveSessionKey = passiveSessionId;
+    }
+
+    for (const event of [...events].sort(compareAddonEvents)) {
+      if (event.eventType === "group_status") {
+        processGroupStatusEvent(event);
       }
     }
   }
@@ -2033,9 +2258,9 @@ async function createDashboardServer(options = {}) {
       return null;
     }
 
-    if (event.eventType === "lfg_status") {
+    if (event.eventType === "lfg_status" || event.eventType === "group_status") {
       return [
-        "lfg_status",
+        event.eventType,
         event.publisherKey || event.channelName || event.publisher || "default",
         event.sessionId || "session",
         event.heartbeatId || event.capturedAtMs || "heartbeat",
@@ -2051,7 +2276,7 @@ async function createDashboardServer(options = {}) {
       return [0, 0, 0, 0, 0];
     }
 
-    if (event.eventType === "lfg_status") {
+    if (event.eventType === "lfg_status" || event.eventType === "group_status") {
       return [
         Number(event.batchTotal || 0),
         Array.isArray(event.members) ? event.members.length : 0,
@@ -2244,6 +2469,8 @@ async function createDashboardServer(options = {}) {
         }
       } else if (event.eventType === "lfg_status") {
         processLfgStatusEvent(event);
+      } else if (event.eventType === "group_status") {
+        processGroupStatusEvent(event);
       }
       delivered.push(event);
     }
@@ -2279,12 +2506,14 @@ async function createDashboardServer(options = {}) {
     }
 
     rebuildLiveLfgRuntimeFromCurrentEvents(passiveLiveScope.events, passiveLiveScope.activeSessionId || null);
+    rebuildLiveGroupRuntimeFromCurrentEvents(passiveLiveScope.events, passiveLiveScope.activeSessionId || null);
     expireStaleLfgState();
 
     return {
       deliveredEvents,
       queue: listBrokerQueueEntries(cache),
       applicants: listLfgRuntimeEntries(),
+      groupMembers: groupRuntime.latestLiveEventAtMs > 0 ? listGroupRuntimeEntries() : null,
       passiveLiveFeedState: passiveLiveFeedState
         ? {
             ...passiveLiveFeedState,
@@ -2351,6 +2580,7 @@ async function createDashboardServer(options = {}) {
       savedVariablesOverride: savedVariables,
       queueOverride: brokerSnapshot.queue,
       applicantsOverride: brokerSnapshot.applicants,
+      groupMembersOverride: Array.isArray(brokerSnapshot.groupMembers) ? brokerSnapshot.groupMembers : undefined,
       classHintsOverride: listPassiveQueueRuntimeEntries(),
       autoSyncState: getAutoSyncState(),
       passiveLiveFeedState: brokerSnapshot.passiveLiveFeedState,

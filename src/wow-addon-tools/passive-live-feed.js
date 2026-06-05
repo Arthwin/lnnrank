@@ -427,7 +427,7 @@ function parseBestPassiveCandidateMetadata(previews) {
 }
 
 function getPassiveCandidateSourceWeight(eventType, source) {
-  if (String(eventType || "").toLowerCase() === "lfg_status") {
+  if (["lfg_status", "group_status"].includes(String(eventType || "").toLowerCase())) {
     return 3;
   }
 

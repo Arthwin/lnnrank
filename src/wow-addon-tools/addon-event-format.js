@@ -24,6 +24,9 @@ function normalizeAddonEventSource(source) {
   if (normalized === "lfgstatus") {
     return "lfg-status";
   }
+  if (normalized === "groupstatus") {
+    return "group-status";
+  }
   return normalized;
 }
 
@@ -84,6 +87,7 @@ const PAYLOAD_FIELD_PATTERNS = {
 const COMMON_PAYLOAD_FIELDS = new Set(["v", "e", "id", "ch", "ss", "pk", "n", "t", "rg", "sr"]);
 const SEARCH_PAYLOAD_FIELDS = new Set(["re", "nm", "ai", "gi", "mi", "ar", "cl", "il", "lv"]);
 const LFG_STATUS_PAYLOAD_FIELDS = new Set(["hb", "ix", "tt", "m", "re", "nm"]);
+const ROSTER_STATUS_EVENT_TYPES = new Set(["lfg_status", "group_status"]);
 
 function normalizeAddonFields(fields = {}) {
   const normalized = {};
@@ -134,7 +138,7 @@ function isFieldAllowedForCurrentPayload(fields, key) {
     return SEARCH_PAYLOAD_FIELDS.has(key);
   }
 
-  if (eventType === "lfg_status") {
+  if (ROSTER_STATUS_EVENT_TYPES.has(eventType)) {
     return LFG_STATUS_PAYLOAD_FIELDS.has(key);
   }
 
@@ -168,7 +172,7 @@ function isCompleteAddonPayloadFields(fields) {
     }
   }
 
-  if (eventType === "lfg_status") {
+  if (ROSTER_STATUS_EVENT_TYPES.has(eventType)) {
     if (isLegacyClear) {
       return Boolean(normalizedFields.re && normalizedFields.nm);
     }
@@ -358,7 +362,7 @@ function parseAddonEventPayload(payload, options = {}) {
     publisher: options.publisher || null,
   };
 
-  if (eventType === "lfg_status") {
+  if (ROSTER_STATUS_EVENT_TYPES.has(eventType)) {
     const heartbeatId = String(fields.hb || "").trim() || null;
     const batchIndex = parseIntegerField(fields.ix) ?? (isLegacyClear ? 0 : null);
     const batchTotal = parseIntegerField(fields.tt) ?? (isLegacyClear ? 0 : null);
@@ -453,14 +457,14 @@ function buildAddonEventPreview(event) {
   if (event.payload) {
     return event.payload;
   }
-  if (event.eventType === "lfg_status") {
+  if (ROSTER_STATUS_EVENT_TYPES.has(event.eventType)) {
     const memberLabel =
       Array.isArray(event.members) && event.members.length > 0
         ? event.members
             .map((member) => `${member.characterName}-${member.realm}`)
             .join(",")
         : "empty";
-    return `LNNRANK|e=lfg_status|sr=${event.source || "lfg-status"}|hb=${event.heartbeatId || "manual"}|m=${memberLabel}`;
+    return `LNNRANK|e=${event.eventType}|sr=${event.source || "status"}|hb=${event.heartbeatId || "manual"}|m=${memberLabel}`;
   }
   return `LNNRANK|e=${event.eventType || "search"}|sr=${event.source || "manual"}|re=${event.realm || ""}|nm=${
     event.characterName || ""

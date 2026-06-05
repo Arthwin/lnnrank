@@ -10,6 +10,7 @@
     <div class="app-shell">
       <nav class="tabs" id="tabs">
         <button class="tab is-active" data-tab="lfg">LFG</button>
+        <button class="tab" data-tab="group">Group</button>
         <button class="tab" data-tab="search">Search</button>
         <button class="tab" data-tab="live">Live Log</button>
         <button class="tab" data-tab="reader">Reader</button>
@@ -73,6 +74,22 @@
                 </div>
               </div>
               <div id="applicantList" class="list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="panel" data-panel="group">
+          <div class="queue-layout">
+            <section class="card lfg-card group-card">
+              <div class="card-head">
+                <div class="queue-card-head-top">
+                  <div>
+                    <h2>Current Group</h2>
+                    <p>Party and raid members from live addon snapshots.</p>
+                  </div>
+                </div>
+              </div>
+              <div id="groupMemberList" class="list"></div>
             </section>
           </div>
         </section>

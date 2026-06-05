@@ -20,6 +20,7 @@ const REQUEST_FIELD_ORDER = [
   "itemLevel",
   "assignedRole",
   "applicantID",
+  "groupID",
   "memberIndex",
 ];
 
@@ -316,6 +317,7 @@ function parseRequestEntries(requestsBlock) {
     "itemLevel",
     "assignedRole",
     "applicantID",
+    "groupID",
     "memberIndex",
   ]);
 }
@@ -339,6 +341,7 @@ function parseSnapshotEntries(block) {
     "healer",
     "damage",
     "applicantID",
+    "groupID",
     "memberIndex",
     "lastSeenAt",
   ]);
