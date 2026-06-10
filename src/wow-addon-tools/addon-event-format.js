@@ -1,9 +1,10 @@
 "use strict";
 
 const ADDON_TOKEN_PATTERN = "[A-Za-z0-9_:-]";
+const ADDON_TEXT_TOKEN_PATTERN = "(?:[A-Za-z0-9_:-]|%[0-9A-Fa-f]{2})";
 const ADDON_MEMBER_TOKEN_PATTERN =
   "(?:" +
-  `${ADDON_TOKEN_PATTERN}{1,32}~${ADDON_TOKEN_PATTERN}{1,32}~g\\d{1,10}~\\d{1,3}` +
+  `${ADDON_TEXT_TOKEN_PATTERN}{1,96}~${ADDON_TEXT_TOKEN_PATTERN}{1,96}~g\\d{1,10}~\\d{1,3}` +
   `(?:~${ADDON_TOKEN_PATTERN}{1,16}~${ADDON_TOKEN_PATTERN}{1,16})?` +
   ")";
 
@@ -54,6 +55,25 @@ function parseUnixMillisecondsField(value) {
   return rawValue.length <= 10 ? parsed * 1000 : parsed;
 }
 
+function decodeAddonTextField(value) {
+  const text = String(value || "");
+  if (!/%[0-9A-Fa-f]{2}/u.test(text)) {
+    return text;
+  }
+
+  try {
+    return decodeURIComponent(text);
+  } catch (_error) {
+    return text.replace(/(?:%[0-9A-Fa-f]{2})+/gu, (sequence) => {
+      const bytes = sequence.match(/[0-9A-Fa-f]{2}/gu);
+      if (!bytes || bytes.length === 0 || typeof Buffer === "undefined") {
+        return sequence;
+      }
+      return Buffer.from(bytes.map((byte) => Number.parseInt(byte, 16))).toString("utf8");
+    });
+  }
+}
+
 function hasAddonField(fields, key) {
   return Object.prototype.hasOwnProperty.call(fields || {}, key);
 }
@@ -69,8 +89,8 @@ const PAYLOAD_FIELD_PATTERNS = {
   t: /^\d{10,13}/u,
   rg: /^[A-Za-z0-9_-]{1,8}/u,
   sr: /^[A-Za-z0-9_-]{1,16}/u,
-  re: /^[A-Za-z0-9_:-]{1,32}/u,
-  nm: /^[A-Za-z0-9_:-]{1,32}/u,
+  re: new RegExp(`^${ADDON_TEXT_TOKEN_PATTERN}{1,96}`, "u"),
+  nm: new RegExp(`^${ADDON_TEXT_TOKEN_PATTERN}{1,96}`, "u"),
   ai: /^\d{1,10}/u,
   gi: /^\d{1,10}/u,
   mi: /^\d{1,3}/u,
@@ -81,13 +101,15 @@ const PAYLOAD_FIELD_PATTERNS = {
   cl: /^[A-Za-z0-9_-]{1,16}/u,
   il: /^\d{1,4}(?:\.\d{1,2})?/u,
   lv: /^\d{1,3}/u,
+  fo: /^[01]/u,
   m: new RegExp(`^(?:_|${ADDON_MEMBER_TOKEN_PATTERN}(?:,${ADDON_MEMBER_TOKEN_PATTERN}){0,31})`, "u"),
 };
 
 const COMMON_PAYLOAD_FIELDS = new Set(["v", "e", "id", "ch", "ss", "pk", "n", "t", "rg", "sr"]);
-const SEARCH_PAYLOAD_FIELDS = new Set(["re", "nm", "ai", "gi", "mi", "ar", "cl", "il", "lv"]);
+const SEARCH_PAYLOAD_FIELDS = new Set(["re", "nm", "ai", "gi", "mi", "ar", "cl", "il", "lv", "fo"]);
 const LFG_STATUS_PAYLOAD_FIELDS = new Set(["hb", "ix", "tt", "m", "re", "nm"]);
 const ROSTER_STATUS_EVENT_TYPES = new Set(["lfg_status", "group_status"]);
+const MANUAL_SEARCH_EVENT_SOURCES = new Set(["unit", "world", "chat-link"]);
 
 function normalizeAddonFields(fields = {}) {
   const normalized = {};
@@ -266,10 +288,16 @@ function extractPayloadTimestampMs(payload) {
 }
 
 function parseLfgHeartbeatMemberToken(token) {
-  const [characterName = "", realm = "", third = "", fourth = "", fifth = "", sixth = ""] = String(token || "").split(
-    "~",
-    6
-  );
+  const [
+    rawCharacterName = "",
+    rawRealm = "",
+    third = "",
+    fourth = "",
+    fifth = "",
+    sixth = "",
+  ] = String(token || "").split("~", 6);
+  const characterName = decodeAddonTextField(rawCharacterName);
+  const realm = decodeAddonTextField(rawRealm);
   if (!characterName || !realm) {
     return null;
   }
@@ -379,8 +407,8 @@ function parseAddonEventPayload(payload, options = {}) {
     } else if (fields.nm && fields.re) {
       members = [
         {
-          characterName: fields.nm,
-          realm: fields.re,
+          characterName: decodeAddonTextField(fields.nm),
+          realm: decodeAddonTextField(fields.re),
           memberIndex: parseIntegerField(fields.mi),
           class: fields.cl || null,
           assignedRole: fields.ar || null,
@@ -396,8 +424,8 @@ function parseAddonEventPayload(payload, options = {}) {
       batchTotal,
       groupID,
       members,
-      realm: firstMember ? firstMember.realm : fields.re || null,
-      characterName: firstMember ? firstMember.characterName : fields.nm || null,
+      realm: firstMember ? firstMember.realm : fields.re ? decodeAddonTextField(fields.re) : null,
+      characterName: firstMember ? firstMember.characterName : fields.nm ? decodeAddonTextField(fields.nm) : null,
       memberIndex: firstMember ? firstMember.memberIndex : parseIntegerField(fields.mi),
       class: firstMember ? firstMember.class : fields.cl || null,
       assignedRole: firstMember ? firstMember.assignedRole : fields.ar || null,
@@ -410,10 +438,11 @@ function parseAddonEventPayload(payload, options = {}) {
     return null;
   }
 
+  const forceRefresh = fields.fo === "1" || MANUAL_SEARCH_EVENT_SOURCES.has(source);
   return {
     ...common,
-    realm: fields.re,
-    characterName: fields.nm,
+    realm: decodeAddonTextField(fields.re),
+    characterName: decodeAddonTextField(fields.nm),
     applicantID: parseIntegerField(fields.ai),
     groupID: parseIntegerField(fields.gi) ?? fields.gi ?? null,
     memberIndex: parseIntegerField(fields.mi),
@@ -421,6 +450,8 @@ function parseAddonEventPayload(payload, options = {}) {
     class: fields.cl || null,
     itemLevel: parseDecimalField(fields.il),
     level: parseIntegerField(fields.lv),
+    force: forceRefresh,
+    forceRefresh,
   };
 }
 

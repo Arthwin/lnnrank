@@ -150,7 +150,7 @@ function getPreferredMetricForRole(roleValue) {
     return "dps";
   }
   if (normalizedRole === "tank") {
-    return "playerscore";
+    return "dps";
   }
   return null;
 }

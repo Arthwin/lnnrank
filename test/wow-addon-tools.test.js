@@ -27,8 +27,13 @@ const {
   formatTimedKeyDisplay,
   getDungeonScoreColorHex,
 } = require("../src/shared/wow-performance");
+const { getPreferredMetricForRole } = require("../src/shared/wow-specs");
 const { extractZoneStats } = require("../src/mplus-matrix/zone-rankings");
 const { createPassiveLiveFeedMonitor } = require("../src/wow-addon-tools/passive-live-feed");
+
+test("tank role hints prefer damage parses instead of points", () => {
+  assert.equal(getPreferredMetricForRole("tank"), "dps");
+});
 
 test("addon bridge normalization matches the Lua-side lookup rules", () => {
   assert.equal(normalizeRealmKeyForAddon("Shattered Hand"), "shatteredhand");

@@ -329,6 +329,104 @@ test("cached records keep richer existing data when a later refresh is partial",
   assert.equal(merged.dungeons[0].role, "tank");
 });
 
+test("role-specific parse refresh clears stale score percent values from cache", () => {
+  const cache = { records: {}, providerState: {} };
+  const lookup = {
+    region: "us",
+    realm: "Stormrage",
+    name: "Acherele",
+  };
+
+  upsertCachedRecord(cache, {
+    ...lookup,
+    score: 1994.47,
+    parseMetric: "playerscore",
+    specName: "Guardian",
+    className: "Druid",
+    role: "tank",
+    updatedAt: "2026-05-31T00:00:00.000Z",
+    dungeons: [
+      {
+        slug: "algetharacademy",
+        label: "AA",
+        bestPercent: 52.22,
+        points: 397679,
+        highestLevel: 11,
+      },
+      {
+        slug: "maisaracaverns",
+        label: "MC",
+        bestPercent: 51.08,
+        points: 383560,
+        highestLevel: 10,
+      },
+      {
+        slug: "pitofsaron",
+        label: "POS",
+        bestPercent: 12.25,
+        points: 406183,
+        highestLevel: 6,
+      },
+      {
+        slug: "windrunnerspire",
+        label: "WS",
+        bestPercent: 17.26,
+        points: 456949,
+        highestLevel: 9,
+      },
+    ],
+  });
+
+  upsertCachedRecord(cache, {
+    ...lookup,
+    score: 1994.47,
+    parseMetric: "dps",
+    specName: "Guardian",
+    className: "Druid",
+    role: "tank",
+    updatedAt: "2026-05-31T01:00:00.000Z",
+    dungeons: [
+      {
+        slug: "algetharacademy",
+        label: "AA",
+        bestPercent: null,
+        points: null,
+        highestLevel: 11,
+      },
+      {
+        slug: "maisaracaverns",
+        label: "MC",
+        bestPercent: 20,
+        points: 0,
+        highestLevel: 10,
+      },
+      {
+        slug: "pitofsaron",
+        label: "POS",
+        bestPercent: 4.2,
+        points: 149666,
+        highestLevel: 6,
+      },
+      {
+        slug: "windrunnerspire",
+        label: "WS",
+        bestPercent: 9.99,
+        points: 159375,
+        highestLevel: 9,
+      },
+    ],
+  });
+
+  const merged = getCachedRecord(cache, lookup);
+  const bySlug = new Map(merged.dungeons.map((dungeon) => [dungeon.slug, dungeon]));
+  assert.equal(bySlug.get("algetharacademy").bestPercent, null);
+  assert.equal(bySlug.get("algetharacademy").points, null);
+  assert.equal(bySlug.get("algetharacademy").highestLevel, 11);
+  assert.equal(bySlug.get("maisaracaverns").bestPercent, 20);
+  assert.equal(bySlug.get("maisaracaverns").points, 0);
+  assert.equal(merged.presentation.averageParsePercent, 11.4);
+});
+
 test("manual queue entries are deduped and removable in the local db", () => {
   const cache = { records: {}, manualRequests: {}, requestStatuses: {}, providerState: {} };
 
@@ -563,6 +661,344 @@ test("force manual requests bypass handled cache state and stay deduped", () => 
   assert.equal(queue[0].force, true);
   assert.equal(queue[0].record.score, 3000);
   assert.equal(buildSyncRequestsFromQueue(queue)[0].force, true);
+});
+
+test("broker queue keeps forced manual searches despite fresh cache until the force completes", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-force-broker-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const key = buildCacheKey("us", "Stormrage", "Forcebroker");
+  const nowMs = Date.now();
+  const forcedAt = new Date(nowMs + 1000).toISOString();
+  const completedAt = new Date(nowMs + 2000).toISOString();
+  const eventId = `manual:${key}:${nowMs}`;
+  const cache = {
+    records: {
+      [key]: {
+        region: "us",
+        realm: "Stormrage",
+        name: "Forcebroker",
+        score: 3000,
+        className: "Mage",
+        specName: "Fire",
+        role: "dps",
+        dungeons: [],
+        updatedAt: new Date(nowMs).toISOString(),
+      },
+    },
+    manualRequests: {},
+    requestStatuses: {
+      [key]: {
+        key,
+        region: "us",
+        realm: "Stormrage",
+        name: "Forcebroker",
+        state: "found",
+        source: "manual",
+        updatedAt: new Date(nowMs - 1000).toISOString(),
+      },
+    },
+    providerState: {},
+  };
+
+  fs.mkdirSync(tempDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  upsertManualRequest(cache, {
+    region: "us",
+    realm: "Stormrage",
+    characterName: "Forcebroker",
+    source: "manual",
+    force: true,
+    eventId,
+    updatedAt: forcedAt,
+  });
+  fs.writeFileSync(dbPath, JSON.stringify(cache, null, 2), "utf8");
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    testHooks,
+  });
+
+  try {
+    const queuedSnapshot = testHooks.snapshotState();
+    assert.equal(queuedSnapshot.queue.length, 1);
+    assert.equal(queuedSnapshot.queue[0].key, key);
+    assert.equal(queuedSnapshot.queue[0].force, true);
+    assert.equal(queuedSnapshot.queue[0].eventId, eventId);
+    assert.equal(buildSyncRequestsFromQueue(queuedSnapshot.queue)[0].force, true);
+
+    const completedCache = loadCache(dbPath);
+    completedCache.records[key].updatedAt = completedAt;
+    completedCache.requestStatuses[key] = {
+      key,
+      region: "us",
+      realm: "Stormrage",
+      name: "Forcebroker",
+      state: "found",
+      source: "manual",
+      force: true,
+      updatedAt: completedAt,
+    };
+    fs.writeFileSync(dbPath, JSON.stringify(completedCache, null, 2), "utf8");
+
+    const completedSnapshot = testHooks.snapshotState();
+    assert.equal(completedSnapshot.queue.length, 0);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("broker queue keeps forced live addon searches despite fresh cache", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-force-live-broker-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const key = buildCacheKey("us", "Stormrage", "Pokemank");
+  const eventTimestampMs = Date.now() + 1000;
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["sessionId"] = "f24cf41628",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify(
+      {
+        records: {
+          [key]: {
+            region: "us",
+            realm: "Stormrage",
+            name: "Pokemank",
+            score: 3110.63,
+            className: "Monk",
+            specName: "Brewmaster",
+            role: "tank",
+            dungeons: [],
+            updatedAt: new Date(eventTimestampMs - 1000).toISOString(),
+          },
+        },
+        manualRequests: {},
+        requestStatuses: {
+          [key]: {
+            key,
+            region: "us",
+            realm: "Stormrage",
+            name: "Pokemank",
+            state: "found",
+            source: "unit",
+            updatedAt: new Date(eventTimestampMs - 500).toISOString(),
+          },
+        },
+        providerState: {},
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: {
+      supported: true,
+      status: "ready",
+      readCursor: {
+        timestampMs: eventTimestampMs,
+        sequence: 82275,
+      },
+      events: [
+        {
+          key: "event-pokemank-force",
+          kind: "payload",
+          preview: `LNNRANK|v=2|e=search|id=f24cf41628-82275|ch=lnnrank0ff24cf4|ss=f24cf41628|n=82275|t=${eventTimestampMs}|rg=us|sr=unit|re=Stormrage|nm=Pokemank`,
+          eventAt: new Date(eventTimestampMs).toISOString(),
+        },
+      ],
+    },
+    testHooks,
+  });
+
+  try {
+    const snapshot = testHooks.snapshotState();
+    assert.equal(snapshot.queue.length, 1);
+    assert.equal(snapshot.queue[0].key, key);
+    assert.equal(snapshot.queue[0].force, true);
+    assert.equal(snapshot.queue[0].requestOrigins.includes("passive-live"), true);
+    assert.equal(buildSyncRequestsFromQueue(snapshot.queue)[0].force, true);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("broker queue promotes guarded reader entries when reader event history is empty", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-reader-entry-force-broker-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const key = buildCacheKey("us", "Stormrage", "Pokemank");
+  const savedAtMs = Date.now() - 60000;
+  const eventTimestampMs = savedAtMs + 30000;
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["sessionId"] = "f24cf41628",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.utimesSync(savedVariablesFile, savedAtMs / 1000, savedAtMs / 1000);
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify(
+      {
+        records: {
+          [key]: {
+            region: "us",
+            realm: "Stormrage",
+            name: "Pokemank",
+            score: 3110.63,
+            className: "Monk",
+            specName: "Brewmaster",
+            role: "tank",
+            dungeons: [],
+            updatedAt: new Date(eventTimestampMs - 1000).toISOString(),
+          },
+        },
+        manualRequests: {},
+        requestStatuses: {
+          [key]: {
+            key,
+            region: "us",
+            realm: "Stormrage",
+            name: "Pokemank",
+            state: "found",
+            source: "unit",
+            updatedAt: new Date(eventTimestampMs - 500).toISOString(),
+          },
+        },
+        providerState: {},
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveLiveFeedStateOverride: {
+      supported: true,
+      status: "ready",
+      readCursor: {
+        timestampMs: eventTimestampMs,
+        sequence: 82276,
+      },
+      entries: [
+        {
+          key: "entry-pokemank-force",
+          kind: "payload",
+          preview: `LNNRANK|v=2|e=search|id=f24cf41628-82276|ch=lnnrank0ff24cf4|ss=f24cf41628|n=82276|t=${eventTimestampMs}|rg=us|sr=unit|re=Stormrage|nm=Pokemank`,
+          eventAt: new Date(eventTimestampMs).toISOString(),
+        },
+      ],
+      events: [],
+    },
+    testHooks,
+  });
+
+  try {
+    const snapshot = testHooks.snapshotState();
+    assert.equal(snapshot.passiveLiveFeed.readerEventCount, 0);
+    assert.equal(snapshot.queue.length, 1);
+    assert.equal(snapshot.queue[0].key, key);
+    assert.equal(snapshot.queue[0].force, true);
+    assert.equal(buildSyncRequestsFromQueue(snapshot.queue)[0].force, true);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
 });
 
 test("sync progress installs companion payload before reporting update", async () => {
@@ -871,6 +1307,41 @@ test("live feed extraction normalizes escaped chat transport payloads", () => {
   );
 });
 
+test("live feed extraction preserves percent-encoded UTF-8 player names", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xC0FFEE",
+        encoding: "window",
+        previewUtf8:
+          "noise....LNNRANK||v=2||e=search||id=s4||ch=lnnrank0ff24cf4||ss=f24cf44941||n=104||t=1780336000004||rg=us||sr=unit||re=Stormrage||nm=P%C3%B5mpolnius more noise",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(
+    entries[0].preview,
+    "LNNRANK|v=2|e=search|id=s4|ch=lnnrank0ff24cf4|ss=f24cf44941|n=104|t=1780336000004|rg=us|sr=unit|re=Stormrage|nm=P%C3%B5mpolnius"
+  );
+
+  const event = parseAddonEventPayload(entries[0].preview);
+  assert.equal(event.characterName, "Põmpolnius");
+  assert.equal(event.realm, "Stormrage");
+});
+
+test("addon event parser decodes UTF-8 roster member tokens", () => {
+  const event = parseAddonEventPayload(
+    "LNNRANK|v=2|e=lfg_status|id=s5|ch=lnnrank0ff24cf4|ss=f24cf44941|n=105|t=1780336000005|rg=us|sr=lfg-status|hb=1780336000005|ix=1|tt=1|m=N%C3%B6nek%C3%B6~Azralon~g23~1~PALADIN~DAMAGER"
+  );
+
+  assert.equal(event.characterName, "Nönekö");
+  assert.equal(event.realm, "Azralon");
+  assert.equal(event.members[0].characterName, "Nönekö");
+  assert.equal(event.members[0].class, "PALADIN");
+});
+
 test("live feed extraction does not attach heartbeat fields to search payloads", () => {
   const entries = extractPassiveLiveFeedEntries({
     matches: [
@@ -933,6 +1404,45 @@ test("live feed extraction trims noisy search names before trailing memory garba
     entries[0].preview,
     "LNNRANK|v=2|e=search|id=f24cf45247-79083|ch=lnnrank0ff24cf4|ss=f24cf45247|n=79083|t=1780356771720|rg=us|sr=world|re=Stormrage|nm=Sadrack"
   );
+});
+
+test("live feed extraction preserves forced search payloads", () => {
+  const entries = extractPassiveLiveFeedEntries({
+    matches: [
+      {
+        address: "0xF012CE",
+        encoding: "utf8",
+        previewUtf8:
+          "junk...LNNRANK||v=2||e=search||id=f24cf41628-82275||ch=lnnrank0ff24cf4||ss=f24cf41628||n=82275||t=1781042065967||rg=us||sr=unit||re=Stormrage||nm=Pokemank||fo=1 trailing",
+        previewUtf16: "",
+      },
+    ],
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(
+    entries[0].preview,
+    "LNNRANK|v=2|e=search|id=f24cf41628-82275|ch=lnnrank0ff24cf4|ss=f24cf41628|n=82275|t=1781042065967|rg=us|sr=unit|re=Stormrage|nm=Pokemank|fo=1"
+  );
+
+  const event = parseAddonEventPayload(entries[0].preview);
+  assert.equal(event.characterName, "Pokemank");
+  assert.equal(event.source, "unit");
+  assert.equal(event.force, true);
+});
+
+test("addon event parser treats live manual search sources as force refreshes", () => {
+  const clicked = parseAddonEventPayload(
+    "LNNRANK|v=2|e=search|id=manual-1|ch=lnnrank0ff24cf4|ss=f24cf41628|n=82276|t=1781042525318|rg=us|sr=unit|re=Stormrage|nm=Pokemank"
+  );
+  const applicant = parseAddonEventPayload(
+    "LNNRANK|v=2|e=search|id=applicant-1|ch=lnnrank0ff24cf4|ss=f24cf41628|n=82277|t=1781042526318|rg=us|sr=applicant|re=Stormrage|nm=Queuedone"
+  );
+
+  assert.equal(clicked.force, true);
+  assert.equal(clicked.forceRefresh, true);
+  assert.equal(applicant.force, false);
+  assert.equal(applicant.forceRefresh, false);
 });
 
 test("live feed extraction ignores incomplete payload fragments", () => {
@@ -2075,6 +2585,94 @@ test("dashboard server ignores memory-reader payloads captured before the latest
     assert.equal(state.passiveLiveFeed.events.length, 1);
     assert.match(state.passiveLiveFeed.events[0].preview, /Freshlive/);
     assert.doesNotMatch(state.passiveLiveFeed.events[0].preview, /Reloadedold/);
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  }
+});
+
+test("dashboard server treats reader entries as diagnostics when read cursor is authoritative", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lnnrank-dashboard-reader-entry-diagnostics-"));
+  const accountRoot = path.join(tempDir, "Account");
+  const savedVariablesDir = path.join(accountRoot, "TESTACCOUNT", "SavedVariables");
+  const savedVariablesFile = path.join(savedVariablesDir, "lnnrank.lua");
+  const dbPath = path.join(tempDir, "db.json");
+  const outputDir = path.join(tempDir, "output");
+  const addonsDir = path.join(tempDir, "addons");
+  const staleTimestampMs = Date.parse("2026-06-01T12:00:00.000Z");
+
+  fs.mkdirSync(savedVariablesDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(addonsDir, { recursive: true });
+  fs.writeFileSync(
+    dbPath,
+    JSON.stringify({ records: {}, requestStatuses: {}, manualRequests: {}, providerState: {} }, null, 2),
+    "utf8"
+  );
+  fs.writeFileSync(
+    savedVariablesFile,
+    [
+      "lnnrankDB = {",
+      '  ["requests"] = {},',
+      '  ["applicants"] = {},',
+      '  ["passiveBridge"] = {',
+      '    ["enabled"] = true,',
+      '    ["joined"] = true,',
+      '    ["channelName"] = "lnnrank0ff24cf4",',
+      '    ["playerKey"] = "0ff24cf4",',
+      '    ["sessionId"] = "f24cf48824",',
+      "  },",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const testHooks = {};
+  const server = await createDashboardServer({
+    accountRoot,
+    dbPath,
+    outputDir,
+    addonsDir,
+    disableBackgroundTick: true,
+    passiveEventBatchMaxAgeMs: 0,
+    passiveEventBatchMaxSize: 1,
+    passiveLiveFeedStateOverride: {
+      supported: true,
+      status: "ready",
+      readCursor: {
+        timestampMs: staleTimestampMs + 1000,
+        sequence: 901,
+      },
+      entries: [
+        {
+          key: "stale-ram-entry",
+          kind: "payload",
+          preview: `LNNRANK|v=2|e=lfg_status|id=stale-entry|ch=lnnrank0ff24cf4|ss=f24cf48824|n=900|t=${staleTimestampMs}|rg=us|sr=lfg-status|hb=${staleTimestampMs}|ix=1|tt=1|m=Oldram~Stormrage~g1~1`,
+          eventAt: new Date(staleTimestampMs).toISOString(),
+          firstSeenAt: new Date(staleTimestampMs + 5000).toISOString(),
+          lastSeenAt: new Date(staleTimestampMs + 10000).toISOString(),
+        },
+      ],
+      events: [],
+    },
+    testHooks,
+  });
+
+  try {
+    const state = testHooks.snapshotState();
+    assert.equal(state.applicants.length, 0);
+    assert.equal(state.passiveLiveFeed.readerEventCount, 0);
+    assert.equal(state.passiveLiveFeed.events.length, 0);
   } finally {
     if (server.listening) {
       await new Promise((resolve, reject) => {

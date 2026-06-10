@@ -707,6 +707,13 @@ th {
   line-height: 1.1;
 }
 
+.lfg-score-star {
+  color: #ffcc4d;
+  font-size: 0.86rem;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(31, 42, 34, 0.3);
+}
+
 .lfg-member-server {
   color: var(--muted);
   font-size: 0.84rem;

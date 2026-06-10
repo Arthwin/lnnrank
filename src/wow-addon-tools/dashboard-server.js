@@ -1532,6 +1532,7 @@ async function createDashboardServer(options = {}) {
       payload: event.payload || null,
       eventId: event.eventId || null,
       sequence: event.sequence || null,
+      force: event.force === true || event.forceRefresh === true,
       assignedRole: event.assignedRole || null,
       class: event.class || null,
       groupID: event.groupID != null ? event.groupID : null,
@@ -1579,6 +1580,7 @@ async function createDashboardServer(options = {}) {
       payload: preferred.payload || fallback.payload || null,
       eventId: preferred.eventId || fallback.eventId || null,
       sequence: preferred.sequence || fallback.sequence || null,
+      force: existing.force === true || candidate.force === true,
       assignedRole: preferred.assignedRole || fallback.assignedRole || null,
       class: preferred.class || fallback.class || null,
       groupID: preferred.groupID != null ? preferred.groupID : fallback.groupID != null ? fallback.groupID : null,
@@ -1681,23 +1683,33 @@ async function createDashboardServer(options = {}) {
 
       const status = requestStatuses.get(entry.key) || null;
       const requestUpdatedAtMs = Date.parse(entry.updatedAt || entry.requestTimestamp || "");
-      const isApplicantEntry = entry.source === "applicant" || entry.applicantID != null || entry.groupID != null;
+      const entrySources = Array.isArray(entry.sources) ? entry.sources : [entry.source].filter(Boolean);
+      const isForceEntry = entry.force === true || entry.forceRefresh === true;
+      const isApplicantEntry = entrySources.includes("applicant") || entry.applicantID != null || entry.groupID != null;
       const needsForcedMetadataRefresh = isApplicantEntry && isCachedRecordMetadataIncomplete(record);
-      if (record && !needsForcedMetadataRefresh) {
+      if (isForceEntry && hasCompletedForceRefreshForRequest(status, requestUpdatedAtMs, record)) {
         continue;
       }
-      if (record && needsForcedMetadataRefresh && hasCompletedForceRefreshForRequest(status, requestUpdatedAtMs, record)) {
+      if (!isForceEntry && record && !needsForcedMetadataRefresh) {
+        continue;
+      }
+      if (
+        !isForceEntry &&
+        record &&
+        needsForcedMetadataRefresh &&
+        hasCompletedForceRefreshForRequest(status, requestUpdatedAtMs, record)
+      ) {
         continue;
       }
 
       const isResolved = isResolvedQueueStatus(status, requestUpdatedAtMs);
-      if (!needsForcedMetadataRefresh && isResolved) {
+      if (!isForceEntry && !needsForcedMetadataRefresh && isResolved) {
         continue;
       }
 
       queueEntries.push({
         ...entry,
-        force: entry.force === true || needsForcedMetadataRefresh,
+        force: isForceEntry || needsForcedMetadataRefresh,
         record: record || null,
         status: status || null,
       });
@@ -2247,6 +2259,8 @@ async function createDashboardServer(options = {}) {
           channelName: null,
           sessionId: null,
           publisherKey: "manual",
+          force: entry.force === true || entry.forceRefresh === true,
+          forceRefresh: entry.force === true || entry.forceRefresh === true,
         };
       })
       .filter(Boolean)

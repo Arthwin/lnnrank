@@ -19,6 +19,29 @@ local function sanitizeSegment(value, maxLength)
     return text
 end
 
+local function encodeTextSegment(value, maxLength)
+    local text = tostring(value or "")
+    text = text:gsub("[%c]", "")
+    text = text:gsub("%s+", "_")
+    if maxLength and #text > maxLength then
+        text = text:sub(1, maxLength)
+    end
+
+    local parts = {}
+    for index = 1, #text do
+        local byte = text:byte(index)
+        if (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or
+            (byte >= 97 and byte <= 122) or byte == 45 or byte == 58 or
+            byte == 95 then
+            parts[#parts + 1] = string.char(byte)
+        else
+            parts[#parts + 1] = string.format("%%%02X", byte)
+        end
+    end
+
+    return table.concat(parts)
+end
+
 local function getNowUnix()
     if type(time) == "function" then
         return time()
@@ -114,6 +137,7 @@ local function buildSearchEvent(lookup)
     event.class = lookup.class
     event.itemLevel = lookup.itemLevel
     event.level = lookup.level
+    event.force = lookup.force == true or lookup.forceRefresh == true
     return event
 end
 
@@ -152,8 +176,8 @@ local function buildHeartbeatMemberToken(member)
     end
 
     local parts = {
-        sanitizeSegment(member.characterName, 32),
-        sanitizeSegment(member.realm, 32),
+        encodeTextSegment(member.characterName, 32),
+        encodeTextSegment(member.realm, 32),
         "g" .. sanitizeSegment(member.groupID or 0, 10),
         sanitizeSegment(member.memberIndex or 0, 3),
     }
@@ -247,8 +271,11 @@ local function encodeEventPayload(event)
     }
 
     if event.eventType == "search" then
-        table.insert(segments, "re=" .. sanitizeSegment(event.realm, 32))
-        table.insert(segments, "nm=" .. sanitizeSegment(event.characterName, 32))
+        table.insert(segments, "re=" .. encodeTextSegment(event.realm, 32))
+        table.insert(segments, "nm=" .. encodeTextSegment(event.characterName, 32))
+        if event.force == true then
+            table.insert(segments, "fo=1")
+        end
     elseif event.eventType == "lfg_status" or event.eventType == "group_status" then
         table.insert(segments, "hb=" .. sanitizeSegment(event.heartbeatId, 24))
         table.insert(segments, "ix=" .. tostring(event.batchIndex or 0))
@@ -263,9 +290,9 @@ local function encodeEventPayload(event)
             end
             table.insert(segments, "m=" .. (#memberTokens > 0 and table.concat(memberTokens, ",") or "_"))
         elseif event.realm then
-            table.insert(segments, "re=" .. sanitizeSegment(event.realm, 32))
+            table.insert(segments, "re=" .. encodeTextSegment(event.realm, 32))
             if event.characterName then
-                table.insert(segments, "nm=" .. sanitizeSegment(event.characterName, 32))
+                table.insert(segments, "nm=" .. encodeTextSegment(event.characterName, 32))
             end
         end
     end

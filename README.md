@@ -1,5 +1,21 @@
 # lnnrank
 
+## Quick run
+
+```powershell
+cd C:\Users\dan_o\Desktop\repos\lnnrank
+Copy-Item .env.example .env
+npm install
+npm run check
+npm test
+npm run sync-wow-addon-requests -- --install-wow
+npm start
+```
+
+Open `http://127.0.0.1:47832`. In WoW, enable `lnnrank` and `lnnrank_companion`, then `/reload`.
+
+For normal development, `npm start` runs the real local dashboard on port `47832`. Use `npm run dev` when you want a sandboxed worktree run that does not touch the live WoW install.
+
 `lnnrank` is a local Warcraft Logs powered World of Warcraft addon project with two main parts:
 
 - a Retail WoW addon in `wow-addons/lnnrank`
@@ -62,11 +78,20 @@ WCL_CLIENT_SECRET
 npm run check
 npm test
 npm run dev
+npm start
 npm run wow-addon-dashboard
 npm run build-wow-addon-character -- --region us --realm Stormrage --name Urmomgargles
 npm run build-wow-addon-mock -- --install-wow
 npm run sync-wow-addon-requests -- --install-wow
 npm run stress:search -- 30 2 web
+```
+
+`npm run sync-wow-addon-requests -- --install-wow` stages the current repo addon,
+publishes the companion payload from the local cache, and installs both addon
+folders into the configured WoW AddOns directory. By default that directory is:
+
+```text
+C:\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns
 ```
 
 Dashboard URL:
@@ -157,7 +182,7 @@ What it does not do:
 - Self can auto-refresh daily.
 - All lookup sources flow through one deterministic WCL gather pipeline.
 - Highest dungeon key data comes from a separate WCL by-level view, not the parse page.
-- Tanks use `playerscore`, DPS use `dps`, healers use `hps`.
+- Tanks and DPS use `dps` parse pages; healers use `hps`.
 
 ## Search performance notes
 

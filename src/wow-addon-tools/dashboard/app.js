@@ -422,6 +422,11 @@ function toneClassForBlendedPerformance(record, averageParse) {
   return toneClassForParsePercent(blendedPercent);
 }
 
+function isPurpleOrBetterPercent(value) {
+  const numeric = toNumber(value);
+  return numeric != null && numeric > 70;
+}
+
 function getRecordAverageParse(record) {
   if (record && record.presentation && toNumber(record.presentation.averageParsePercent) != null) {
     return toNumber(record.presentation.averageParsePercent);
@@ -564,7 +569,7 @@ function resolveWclMetric(character) {
     return "dps";
   }
   if (resolvedRole === "tank") {
-    return "playerscore";
+    return "dps";
   }
 
   const parseMetric = String(character && character.parseMetric || "").trim().toLocaleLowerCase("en-US");
@@ -1558,6 +1563,12 @@ function renderLfgMemberRow(entry, data) {
   const primaryScore = record && record.score != null ? record.score : null;
   const primaryScoreClass = toneClassForWclScore(primaryScore);
   const primaryScoreText = primaryScore == null ? "" : formatCompactNumber(primaryScore, 2);
+  const blendedPercent = getRecordBlendedPercent(record, averageParse);
+  const blendedPercentText = blendedPercent == null ? "" : formatPercentMetric(blendedPercent);
+  const blendedPercentClass = toneClassForBlendedPerformance(record, averageParse);
+  const starMarkup = isPurpleOrBetterPercent(blendedPercent)
+    ? '<span class="lfg-score-star" title="70+ LÑÑ score" aria-label="70+ LÑÑ score">★</span>'
+    : "";
   const averageParseText =
     averageParse == null ? "" : `${formatCompactNumber(Math.round(averageParse), 0)}%`;
   const averageParseClass = toneClassForParsePercent(averageParse);
@@ -1566,8 +1577,15 @@ function renderLfgMemberRow(entry, data) {
   const regionInfo = entry.region ? String(entry.region).toUpperCase() : "";
   const summaryParts = [];
 
+  if (blendedPercentText) {
+    summaryParts.push(
+      `<span class="metric-pair lfg-summary-metric"><span class="metric-label">LÑÑ</span><span class="tone-value ${blendedPercentClass}">${escapeHtml(blendedPercentText)}</span></span>`
+    );
+  }
   if (primaryScoreText) {
-    summaryParts.push(`<span class="tone-value ${primaryScoreClass}">${escapeHtml(primaryScoreText)}</span>`);
+    summaryParts.push(
+      `<span class="metric-pair lfg-summary-metric"><span class="metric-label">IO</span><span class="tone-value ${primaryScoreClass}">${escapeHtml(primaryScoreText)}</span></span>`
+    );
   }
   if (averageParseText) {
     summaryParts.push(`<span class="tone-value ${averageParseClass}">${escapeHtml(averageParseText)}</span>`);
@@ -1593,6 +1611,7 @@ function renderLfgMemberRow(entry, data) {
               assignedRole: entry.assignedRole,
               role: record && record.role,
             }))}" target="_blank" rel="noreferrer noopener"><strong${nameStyle}>${escapeHtml(entry.characterName)}</strong></a>
+            ${starMarkup}
             <span class="lfg-member-server">- ${escapeHtml(entry.realm)}</span>
             ${regionInfo ? `<span class="lfg-member-region">${escapeHtml(regionInfo)}</span>` : ""}
           </div>

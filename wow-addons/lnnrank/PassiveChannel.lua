@@ -39,6 +39,29 @@ local function sanitizeSegment(value, maxLength)
     return text
 end
 
+local function encodeTextSegment(value, maxLength)
+    local text = tostring(value or "")
+    text = text:gsub("[%c]", "")
+    text = text:gsub("%s+", "_")
+    if maxLength and #text > maxLength then
+        text = text:sub(1, maxLength)
+    end
+
+    local parts = {}
+    for index = 1, #text do
+        local byte = text:byte(index)
+        if (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or
+            (byte >= 97 and byte <= 122) or byte == 45 or byte == 58 or
+            byte == 95 then
+            parts[#parts + 1] = string.char(byte)
+        else
+            parts[#parts + 1] = string.format("%%%02X", byte)
+        end
+    end
+
+    return table.concat(parts)
+end
+
 local function getNowUnix()
     if type(time) == "function" then
         return time()
@@ -300,8 +323,8 @@ local function buildPayload(request)
         "ss=" .. sanitizeSegment(ensurePassiveSessionId(), 20),
         "n=" .. tostring(publishSequence),
         "rg=" .. sanitizeSegment(request.region, 8),
-        "re=" .. sanitizeSegment(request.realm, 32),
-        "nm=" .. sanitizeSegment(request.characterName, 32),
+        "re=" .. encodeTextSegment(request.realm, 32),
+        "nm=" .. encodeTextSegment(request.characterName, 32),
         "sr=" .. sanitizeSegment(request.source, 16),
     }
 

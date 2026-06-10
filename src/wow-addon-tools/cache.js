@@ -237,14 +237,24 @@ function getFreshCachedRecord(cache, lookup, now = Date.now()) {
   return record;
 }
 
-function mergeDungeonArrays(existingDungeons, incomingDungeons) {
+function isRoleSpecificParseMetric(value) {
+  const metric = String(value || "").trim().toLocaleLowerCase("en-US");
+  return metric === "dps" || metric === "hps";
+}
+
+function mergeDungeonArrays(existingDungeons, incomingDungeons, options = {}) {
   const merged = new Map();
+  const replaceParseStats = Boolean(options.replaceParseStats);
 
   for (const dungeon of existingDungeons || []) {
     if (!dungeon || !dungeon.slug) {
       continue;
     }
-    merged.set(dungeon.slug, { ...dungeon });
+    merged.set(dungeon.slug, {
+      ...dungeon,
+      bestPercent: replaceParseStats ? null : dungeon.bestPercent ?? null,
+      points: replaceParseStats ? null : dungeon.points ?? null,
+    });
   }
 
   for (const dungeon of incomingDungeons || []) {
@@ -256,8 +266,12 @@ function mergeDungeonArrays(existingDungeons, incomingDungeons) {
     merged.set(dungeon.slug, {
       ...existing,
       ...dungeon,
-      bestPercent: dungeon.bestPercent != null ? dungeon.bestPercent : existing.bestPercent ?? null,
-      points: dungeon.points != null ? dungeon.points : existing.points ?? null,
+      bestPercent: replaceParseStats
+        ? dungeon.bestPercent ?? null
+        : dungeon.bestPercent != null ? dungeon.bestPercent : existing.bestPercent ?? null,
+      points: replaceParseStats
+        ? dungeon.points ?? null
+        : dungeon.points != null ? dungeon.points : existing.points ?? null,
       highestLevelPoints:
         dungeon.highestLevelPoints != null ? dungeon.highestLevelPoints : existing.highestLevelPoints ?? null,
       highestLevel: dungeon.highestLevel != null ? dungeon.highestLevel : existing.highestLevel ?? null,
@@ -326,7 +340,9 @@ function mergeCharacterRecords(existingRecord, incomingRecord) {
       incomingRecord.wclCharacterId != null
         ? incomingRecord.wclCharacterId
         : existingRecord.wclCharacterId ?? null,
-    dungeons: mergeDungeonArrays(existingRecord.dungeons, incomingRecord.dungeons),
+    dungeons: mergeDungeonArrays(existingRecord.dungeons, incomingRecord.dungeons, {
+      replaceParseStats: isRoleSpecificParseMetric(incomingRecord.parseMetric),
+    }),
   };
 
   return {
@@ -358,7 +374,7 @@ function normalizeRequestEntry(input = {}) {
   const realm = normalizeText(input.realm || "");
   const characterName = normalizeText(input.characterName || input.name || "");
   const key = buildCacheKey(region, realm, characterName);
-  return {
+  const entry = {
     key,
     region,
     realm,
@@ -368,6 +384,10 @@ function normalizeRequestEntry(input = {}) {
     createdAt: input.createdAt || new Date().toISOString(),
     updatedAt: input.updatedAt || new Date().toISOString(),
   };
+  if (input.eventId) {
+    entry.eventId = String(input.eventId);
+  }
+  return entry;
 }
 
 function getManualRequest(cache, lookup) {

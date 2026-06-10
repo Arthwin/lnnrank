@@ -108,6 +108,7 @@ local function queueCharacter(region, realm, characterName, source, extra)
     local request = addon.QueueRequest(region, realm, characterName)
     request.source = source
     request.userQueued = true
+    request.force = true
 
     if type(extra) == "table" then
         for key, value in pairs(extra) do
