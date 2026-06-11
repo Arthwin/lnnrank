@@ -7,7 +7,6 @@ end
 local lastQueuedKey
 local lastQueuedAt = 0
 local lastMouseoverPlayer
-local directFrameHookPending = false
 
 local CLICK_BUTTONS = {
     LeftButton = true,
@@ -193,66 +192,6 @@ local function onUnitFrameClick(frameOrUnit, secondArg, thirdArg)
     queueUnitToken(unitToken, "unit")
 end
 
-local function onDirectUnitFrameMouseUp(frame, button)
-    if not isCtrlQueueClick(button) then
-        return
-    end
-
-    queueUnitToken(getUnitTokenFromFrame(frame), "unit")
-end
-
-local function onDirectUnitFramePostClick(frame, button)
-    if not isCtrlQueueClick(button) then
-        return
-    end
-
-    queueUnitToken(getUnitTokenFromFrame(frame), "unit")
-end
-
-local function tryHookDirectUnitFrame(frame)
-    if type(frame) ~= "table" or frame.LNNRankDirectUnitHooked or type(frame.HookScript) ~= "function" then
-        return false
-    end
-
-    local unitToken = getUnitTokenFromFrame(frame)
-    if type(unitToken) ~= "string" or unitToken == "" then
-        return false
-    end
-
-    frame:HookScript("OnMouseUp", onDirectUnitFrameMouseUp)
-    if type(frame.IsObjectType) == "function" and frame:IsObjectType("Button") then
-        frame:HookScript("PostClick", onDirectUnitFramePostClick)
-    end
-    frame.LNNRankDirectUnitHooked = true
-    return true
-end
-
-local function scanForDirectUnitFrames()
-    if directFrameHookPending then
-        return
-    end
-
-    if InCombatLockdown() then
-        directFrameHookPending = true
-        return
-    end
-
-    local frame = EnumerateFrames and EnumerateFrames() or nil
-    while frame do
-        tryHookDirectUnitFrame(frame)
-        frame = EnumerateFrames(frame)
-    end
-end
-
-local function flushPendingDirectFrameHooks()
-    if not directFrameHookPending or InCombatLockdown() then
-        return
-    end
-
-    directFrameHookPending = false
-    scanForDirectUnitFrames()
-end
-
 local function onWorldFrameMouseDown(_, button)
     if not isCtrlQueueClick(button) then
         return
@@ -327,23 +266,18 @@ mouseoverFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 mouseoverFrame:RegisterEvent("PLAYER_FOCUS_CHANGED")
 mouseoverFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 mouseoverFrame:RegisterEvent("NAME_PLATE_UNIT_ADDED")
-mouseoverFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 mouseoverFrame:SetScript("OnEvent", updateLastMouseoverPlayer)
 
-local previousMouseoverHandler = mouseoverFrame:GetScript("OnEvent")
 mouseoverFrame:SetScript("OnEvent", function(_, event, ...)
     if event == "UPDATE_MOUSEOVER_UNIT" then
         updateLastMouseoverPlayer()
         return
     end
 
-    if event == "PLAYER_REGEN_ENABLED" then
-        flushPendingDirectFrameHooks()
+    if event == "NAME_PLATE_UNIT_ADDED" then
+        updateLastMouseoverPlayer(...)
         return
     end
 
-    scanForDirectUnitFrames()
-    if event == "NAME_PLATE_UNIT_ADDED" then
-        updateLastMouseoverPlayer(...)
-    end
+    updateLastMouseoverPlayer()
 end)
