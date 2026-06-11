@@ -9,6 +9,7 @@ output/*
 !output/wow-addon-dashboard/
 output/wow-addons/*
 !output/wow-addons/.gitkeep
+!output/wow-addons/lnnrank-db.json
 output/wow-addon-dashboard/*
 !output/wow-addon-dashboard/.gitkeep
 

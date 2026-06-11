@@ -52,10 +52,18 @@ running addon.
 - `src/shared`: shared spec, role, color, and presentation math
 - `src/wow-addon-tools`: local DB, sync pipeline, WCL gathering, addon bundle generation, dashboard server
 - `src/wow-addon-tools/dashboard`: browser UI
+- `output/wow-addons/lnnrank-db.json`: tracked starter cache for fresh clones
 - `research/reload-transport-pocs`: archived local POCs from the reload-transport investigation
 - `wow-addons/lnnrank`: addon source
 - `test`: Node test coverage for sync, mock, and lookup behavior
 - `REQUIREMENTS.md`: frozen functional requirements from the build conversation
+
+## Shared Cache
+
+The latest downloadable cache is tracked at `output/wow-addons/lnnrank-db.json`.
+The dashboard uses this path by default, so a fresh clone starts with populated
+results even before new lookups run. Generated addon bundles and logs remain
+ignored; only the JSON cache is intentionally committed.
 
 ## Local setup
 
